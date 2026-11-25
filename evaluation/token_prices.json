@@ -1,0 +1,8 @@
+{
+  "codex-standard-2026-11-25": {
+    "source": "https://help.openai.com/en/articles/20001415-chatgpt-rate-card-enterprise-token-based-pricing",
+    "usd_per_million_tokens": {
+      "gpt-6.1-terra": {"input": "1.00", "cached_input": "0.05", "output": "5.00"}
+    }
+  }
+}

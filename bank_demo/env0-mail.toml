@@ -1,0 +1,13 @@
+[environment]
+name = "bank-correspondence"
+base_image = "ghcr.io/benchflow-ai/env0:0.2.0@sha256:eeef0fc5ac0d16bf22280e4c8b74f4dcd9bb60bdab665a03631fbcb02e788870"
+isolation = "per_task"
+owns_lifecycle = false
+
+[environment.readiness]
+timeout_sec = 45
+
+[[environment.services]]
+name = "mock-gmail"
+command = "mock-gmail --db /trial/mail.sqlite serve --host 127.0.0.1 --port 9001 --no-mcp"
+port = 9001

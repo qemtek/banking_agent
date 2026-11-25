@@ -1,0 +1,14 @@
+__pycache__/
+audits/
+.venv/
+.env
+.env.*
+.DS_Store
+.playwright-mcp/
+.pytest_cache/
+mlruns/
+data/.embeddings_cache/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
