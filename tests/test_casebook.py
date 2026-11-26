@@ -11,7 +11,8 @@ from unittest.mock import Mock, patch
 
 from bank_demo.casebook import actor, run
 from bank_demo.card_tasks import CARD_VARIANTS
-from bank_demo.instances import BEHAVIOURS, DIFFICULTIES, VARIANTS, digest, generate, materialize, validate
+from bank_demo.instances import (BEHAVIOURS, DIFFICULTIES, SERVICING_FAMILIES, VARIANTS, digest, generate,
+                                 generate_independent, materialize, validate)
 from bank_demo.ledger import gbp
 from bank_demo.refund_pairs import freeze
 from evaluation import evaluate
@@ -53,7 +54,7 @@ class CasebookTests(unittest.TestCase):
             scenario = task.setup(self.directory)
             self.assertEqual(scenario.agent.max_calls, DEFAULT_MAX_TOOL_CALLS)
             self.assertEqual(len(case["messages"]), 1 + len(task.followups))
-            if case["family"] in CARD_VARIANTS:
+            if case["family"] in CARD_VARIANTS or case["family"] in SERVICING_FAMILIES:
                 self.assertTrue(scenario.state_database.is_file())
             else:
                 self.assertIsNotNone(scenario.reviewer)
@@ -73,6 +74,42 @@ class CasebookTests(unittest.TestCase):
         instruction = f"Today's date in this bank session is {case['world']['as_of']}."
         self.assertIn(instruction, materialize(case, Mock).setup(self.directory).agent.instructions)
         self.assertIn(instruction, actor(case, self.directory, Mock).brief)
+
+    def test_independent_worlds_cover_cells_without_reusing_paired_card_worlds(self):
+        def book(split, families):
+            return generate_independent(710, split, families, BEHAVIOURS, DIFFICULTIES, 30)
+        data = book("development", ["card_selection", "receipt"])
+        validate(data)
+        self.assertEqual(len({c["world_seed"] for c in data["cases"]}), 60)
+        cards = [c for c in data["cases"] if c["family"] == "card_selection"]
+        expected = set(product(VARIANTS["card_selection"], BEHAVIOURS, DIFFICULTIES))
+        self.assertEqual({(c["variant"], c["behaviour"], c["difficulty"]) for c in cards}, expected)
+        self.assertEqual({c["case_id"] for c in cards},
+                         {c["case_id"] for c in book("development", ["card_selection"])["cases"]})
+        self.assertFalse({c["world_seed"] for c in cards}
+                         & {c["world_seed"] for c in book("holdout", ["card_selection"])["cases"]})
+
+    def test_holdout_sampling_draws_cells_with_replacement(self):
+        def draw(families):
+            return generate_independent(710, "holdout", families, BEHAVIOURS, DIFFICULTIES, 30, sampling="iid")
+        book = draw(["card_address_change"])
+        validate(book)
+        self.assertEqual(book["design"], "iid-v1")
+        cells = [(c["variant"], c["behaviour"], c["difficulty"]) for c in book["cases"]]
+        self.assertLess(len(set(cells)), len(cells))
+        self.assertEqual(len({c["world_seed"] for c in book["cases"]}), 30)
+        combined = draw(["card_address_change", "receipt"])
+        self.assertEqual({c["case_id"] for c in book["cases"]},
+                         {c["case_id"] for c in combined["cases"] if c["family"] == "card_address_change"})
+
+    def test_simulator_preserves_the_signed_return_instruction(self):
+        case, = generate(7, "development", ["dispute_credit_limit"], ["pressuring"], ["hard"], 1,
+                         variants=["dispute_only"])["cases"]
+        customer = actor(case, self.directory, Mock)
+        self.assertEqual(customer.fixed_messages, {1: case["messages"][1]})
+        reply = customer.speak([("Can you help with these two requests?", "Please confirm what you want.")])
+        self.assertEqual(reply, case["messages"][1])
+        customer.model.respond.assert_not_called()
 
     def test_parallel_repeats_isolate_state_and_keep_casebook_order_after_a_setup_error(self):
         book = generate(7, "development", ["lookup"], ["cooperative"], ["medium"], 2)

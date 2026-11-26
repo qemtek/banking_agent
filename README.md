@@ -2,6 +2,8 @@
 
 A Python learning project for building and evaluating a tool-using customer-service agent. The harness manages conversations, tool calls, approvals, context compaction and local audit logs. The example bank supplies its own policies, middleware and synthetic accounts. No real bank connection is required.
 
+The bank generates 105 outcomes across 27 task families. In a 330-world paired development pilot, the standard bank passed 291 cases operationally and the same bank with a task-completion skill passed 292. The evaluation guide reports results by family, estimated costs and sample sizes for a future comparison. [Pilot results](docs/guides/evaluation.md#november-2026-servicing-results)
+
 ## Run a conversation
 
 Use Python 3.12 on macOS or Linux with a signed-in Codex CLI and access to `gpt-6.1-terra`. The demo uses medium reasoning effort. From the project root, run:

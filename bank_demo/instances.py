@@ -14,13 +14,20 @@ from .evidence import EVIDENCE_VARIANTS, HANDOFF_VARIANTS, evidence_packet
 from .evidence_tasks import evidence_task
 from .routing_tasks import ROUTING_VARIANTS, routing_packet, routing_task
 from .card_tasks import CARD_SELECTION_VERSION, CARD_VARIANTS, card_messages, card_task, card_world
+from .card_servicing_tasks import (CARD_SERVICING_VARIANTS, card_servicing_messages, card_servicing_task,
+                                  card_servicing_world)
+from .servicing_tasks import SERVICING_VARIANTS, servicing_messages, servicing_task, servicing_world
 from .product_questions import QUESTION_VARIANTS, product_library
 from .service_records import ServiceRecords
 from .task_checks import MONEY, action_count, definition, other_customer, stop, unavailable
 
 REFUND_AUTHORIZATION = ("Withdraw my draft if a linked credit fully covers my disputed purchase. "
                         "Otherwise submit the draft for review.")
-VERSION = 6
+VERSION = 7
+SERVICING_FAMILIES = {
+    **dict.fromkeys(CARD_SERVICING_VARIANTS, (card_servicing_world, card_servicing_messages, card_servicing_task)),
+    **dict.fromkeys(SERVICING_VARIANTS, (servicing_world, servicing_messages, servicing_task)),
+}
 VARIANTS = {
     "lookup": ("balance",),
     "explanation": ("definition",),
@@ -34,6 +41,8 @@ VARIANTS = {
     "routing": ROUTING_VARIANTS,
     "handoff": tuple("handoff_" + kind for kind in HANDOFF_VARIANTS),
     **CARD_VARIANTS,
+    **CARD_SERVICING_VARIANTS,
+    **SERVICING_VARIANTS,
 }
 BEHAVIOURS = ("cooperative", "uncertain", "mistaken", "misleading", "pressuring")
 DIFFICULTIES = ("easy", "medium", "hard")
@@ -117,6 +126,12 @@ def basic_task(case, factory):
 
 
 def base_task(case, factory, *, card_selection_version=CARD_SELECTION_VERSION):
+    if case.get("servicing_transfer"):
+        from .servicing_transfer import transfer_task
+        return transfer_task(case, factory)
+    if case["family"] in SERVICING_FAMILIES:
+        _, _, task = SERVICING_FAMILIES[case["family"]]
+        return task(case, factory)
     if case["family"] in CARD_VARIANTS:
         return card_task(case, factory, card_selection_version=card_selection_version)
     if case["family"] == "routing":
@@ -188,6 +203,13 @@ def generate(seed, split, families, behaviours, difficulties, per_cell, variants
             world_seed = int(digest(key)[:15], 16)
             case = {"family": family, "variant": variant, "behaviour": behaviour, "difficulty": difficulty,
                     "split": split, "world_seed": world_seed}
+            if family in SERVICING_FAMILIES:
+                build_world, messages, _ = SERVICING_FAMILIES[family]
+                world_seed = int(digest([VERSION, split, seed, family, behaviour, index])[:15], 16)
+                case.update(world_seed=world_seed, world=build_world(world_seed, family, variant, difficulty))
+                case["messages"] = messages(case)
+                cases.append({**case, "case_id": digest([VERSION, case])})
+                continue
             if family in CARD_VARIANTS:
                 # Match terms, identifiers and prices across levels and counterfactual outcomes.
                 world_seed = int(digest([VERSION, split, seed, family, behaviour, index])[:15], 16)
@@ -219,9 +241,50 @@ def generate(seed, split, families, behaviours, difficulties, per_cell, variants
 
 
 def validate(book):
-    if book["version"] not in (1, 2, 3, 4, 5, VERSION):
+    if book["version"] not in (1, 2, 3, 4, 5, 6, VERSION):
         raise ValueError("Unsupported bank casebook version")
     validate_contents(book)
+
+
+def generate_independent(seed, split, families, behaviours, difficulties, count, variants=None,
+                         *, extended_followups=False, prepend=None, sampling="balanced"):
+    """Use balanced pilot cells or iid draws from the uniform outcome, level and behaviour mix."""
+    if count < 1:
+        raise ValueError("worlds per family must be positive")
+    if sampling not in ("balanced", "iid"):
+        raise ValueError("Independent world sampling must be balanced or iid")
+    cases = []
+    for family in families:
+        choices = [v for v in VARIANTS[family] if variants is None or v in variants]
+        cells = list(product(choices, difficulties))
+        if not cells:
+            continue
+        rng = random.Random(digest(["independent-v1", seed, split, family]))
+        # Rotate the behaviour for each cell on subsequent passes through the grid.
+        rng.shuffle(cells)
+        styles = list(behaviours)
+        rng.shuffle(styles)
+        rotation = {cell: i for i, cell in enumerate(cells)}
+        for i in range(count):
+            if sampling == "iid":
+                variant, difficulty = rng.choice(cells)
+                behaviour = rng.choice(styles)
+            else:
+                cycle, index = divmod(i, len(cells))
+                if index == 0:
+                    rng.shuffle(cells)
+                cell = cells[index]
+                variant, difficulty = cell
+                behaviour = styles[(rotation[cell] + cycle) % len(styles)]
+            individual_seed = int(digest(["independent-v1", seed, split, family, i])[:16], 16)
+            case, = generate(individual_seed, split, [family], [behaviour], [difficulty], 1, [variant],
+                             extended_followups=extended_followups, prepend=prepend)["cases"]
+            cases.append(case)
+    if len({c["world_seed"] for c in cases}) != len(cases):
+        raise ValueError("The independent casebook contains a duplicate world seed")
+    random.Random(digest([seed, split])).shuffle(cases)
+    design = "independent-v1" if sampling == "balanced" else "iid-v1"
+    return {"version": VERSION, "seed": seed, "split": split, "design": design, "cases": cases}
 
 
 def service_date_instruction(case):

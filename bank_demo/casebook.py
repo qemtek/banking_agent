@@ -1,5 +1,6 @@
 """Generate a frozen casebook, then execute a named system against it."""
 import argparse
+import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
@@ -16,10 +17,11 @@ from .archive_case import freeze_handoff
 from . import BANK_PROMPT_VERSION, POLICY_SHA256
 from .customer import ScenarioCustomer
 from .card_tasks import CARD_SELECTION_VERSION, CARD_VARIANTS
+from .servicing_worlds import SERVICING_VARIANTS
 from .followup_tasks import CORRECTIONS, FOLLOWUP_VARIANTS, OPENING_INSTRUCTION
 from .routing_tasks import FRAUD_REPORT, RECOGNISED_REPORT
-from .instances import (BEHAVIOURS, DIFFICULTIES, REFUND_AUTHORIZATION, VARIANTS, digest, generate,
-                        materialize, service_date_instruction, validate)
+from .instances import (BEHAVIOURS, DIFFICULTIES, REFUND_AUTHORIZATION, SERVICING_FAMILIES, VARIANTS, digest, generate,
+                        generate_independent, materialize, service_date_instruction, validate)
 
 PERSONA = {
     "cooperative": "Be factual and cooperative.",
@@ -36,6 +38,13 @@ def actor(case, directory, factory=create_model):
               for m in case["messages"]]
     required = {}
     fixed = {}
+    if case["family"] in SERVICING_FAMILIES:
+        for i in range(len(stages)):
+            stages[i] += (" Preserve every identifier, amount, date and condition in this turn's objective. "
+                          "Report only the app actions mentioned in this turn. Give consent only within the stated scope.")
+    if case["family"] in SERVICING_VARIANTS and case["world"]["scope"]:
+        # The app and the customer must deliver the same decision on the confirmation turn.
+        fixed.update(enumerate(case["messages"][1:], start=1))
     if case["family"] in CARD_VARIANTS:
         for i in range(len(stages)):
             stages[i] += " Verified personal details and signed permissions come only from the app."
@@ -70,6 +79,15 @@ def actor(case, directory, factory=create_model):
 
 def write(path, data):
     path.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def source_digest():
+    root = Path(__file__).resolve().parents[1]
+    sources = [p for directory in ("harness", "adapters", "bank_demo", "docs/policies")
+               for p in (root / directory).rglob("*") if p.suffix in (".py", ".toml", ".md")]
+    sources.extend(root / "evaluation" / name for name in ("__init__.py", "casebooks.py", "scoring.py"))
+    return digest({p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+                   for p in sources})
 
 
 def stage_report(report):
@@ -146,11 +164,14 @@ def run(book, args):
                 "generator_version": book["version"], "score_version": SCORE_VERSION,
                 "bank_prompt_version": BANK_PROMPT_VERSION, "policy_sha256": POLICY_SHA256,
                 "casebook_id": digest(book), "instruction_hash": digest(instruction),
+                "source_sha256": source_digest(),
                 "extra_instruction": instruction, "customer_mode": args.customer_mode,
                 "actor_version": 2 if any(c["family"] == "followup" for c in book["cases"]) else 1,
                 "repeats": args.repeats, "workers": workers, "backend": backend, **runtime, "model": model.model_id,
                 "reasoning_effort": model.reasoning_effort, "price_card": price_card()}
     manifest["max_tool_calls"] = DEFAULT_MAX_TOOL_CALLS
+    if any(c["family"] in SERVICING_VARIANTS for c in book["cases"]):
+        manifest["actor_version"] = 3
     if any(service_date_instruction(c) for c in book["cases"]):
         manifest["session_date_source"] = "frozen_case"
     budget = getattr(model, "context_budget", None)
@@ -199,8 +220,13 @@ def main():
     gen.add_argument("--variant", choices=[v for group in VARIANTS.values() for v in group], nargs="+")
     gen.add_argument("--behaviour", choices=BEHAVIOURS, nargs="+", default=BEHAVIOURS)
     gen.add_argument("--difficulty", choices=DIFFICULTIES, nargs="+", default=DIFFICULTIES)
-    gen.add_argument("--per-cell", type=int, default=1,
-                     help="Distinct frozen worlds per variant × behaviour × difficulty (default: 1)")
+    counts = gen.add_mutually_exclusive_group()
+    counts.add_argument("--per-cell", type=int, default=1,
+                        help="Instances per variant × behaviour × difficulty (default: 1)")
+    counts.add_argument("--worlds-per-family", type=int,
+                        help="Independent worlds per family, spread across outcomes and difficulty levels")
+    gen.add_argument("--sampling", choices=("balanced", "iid"),
+                     help="With --worlds-per-family, balance cells (default) or draw each case independently from the uniform mix")
     gen.add_argument("--extended-followups", action="store_true",
                      help="Add purchase comparison and credit tracing to hard corrected-consent conversations")
     transfer = commands.add_parser("transfer", help="Freeze a completed live open-draft conversation for the next agent")
@@ -230,9 +256,14 @@ def main():
         book = freeze_handoff(args.directory, args.case_id, args.repeat)
     else:
         families = args.family or (["upsell", "eligibility"] if args.prepend else list(VARIANTS))
+        if args.sampling and args.worlds_per_family is None:
+            parser.error("--sampling requires --worlds-per-family")
         try:
-            book = generate(args.seed, args.split, families, args.behaviour, args.difficulty, args.per_cell, args.variant,
-                            extended_followups=args.extended_followups, prepend=args.prepend)
+            generator = generate_independent if args.worlds_per_family is not None else generate
+            count = args.worlds_per_family if args.worlds_per_family is not None else args.per_cell
+            options = {"sampling": args.sampling} if args.sampling else {}
+            book = generator(args.seed, args.split, families, args.behaviour, args.difficulty, count, args.variant,
+                             extended_followups=args.extended_followups, prepend=args.prepend, **options)
         except ValueError as error:
             parser.error(str(error))
     if not book["cases"]:

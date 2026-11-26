@@ -16,6 +16,9 @@ from .instances import materialize, validate
 from .tasks import bank_tasks
 
 
+TURN_SNAPSHOT_VERSION = 5
+
+
 def saved_source(check):
     if "source" in check:
         return check["source"]
@@ -45,6 +48,7 @@ def replay_row(task, row, directory, version):
     conversation = None
     dialogue = []
     origins = []
+    history = []
     with TemporaryDirectory() as scratch:
         fixture = task.setup(Path(scratch))
         database = fixture.state_database if isinstance(fixture, Scenario) else None
@@ -66,11 +70,11 @@ def replay_row(task, row, directory, version):
             dialogue.extend([{"speaker": "customer", "text": events[0]["payload"]["message"]},
                              {"speaker": "bank", "text": result.reply}])
             prefix = f"Turn {n} · " if len(turns) > 1 else ""
-            checks.extend(replace(c, criterion=prefix + c.criterion) for c in turn.score(result, events))
+            checks.extend(replace(c, criterion=prefix + c.criterion) for c in task.score_turn(turn, result, events, history))
             snapshot = trial / "snapshots" / (path.stem + ".sqlite")
-            if database and (snapshot.is_file() or n == len(turns) or version >= SCORE_VERSION):
+            if database and (snapshot.is_file() or n == len(turns) or version >= TURN_SNAPSHOT_VERSION):
                 origin = "turn snapshot"
-                if not snapshot.is_file() and version < SCORE_VERSION and len(ledger_names) == 1:
+                if not snapshot.is_file() and version < TURN_SNAPSHOT_VERSION and len(ledger_names) == 1:
                     snapshot = trial / next(iter(ledger_names))
                     origin = "final ledger"
                 if not snapshot.is_file():
@@ -93,6 +97,8 @@ def replay_row(task, row, directory, version):
 
 
 def rescore(directory):
+    from .casebook import source_digest
+    replay_source = source_digest()
     manifest_path = directory / "manifest.json"
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
     factory = lambda: None  # Rebuild the fixture in scratch space. Scoring never calls a model.
@@ -113,7 +119,8 @@ def rescore(directory):
     for row in json.loads((directory / "report.json").read_text()):
         task = materialize(generated[row["case_id"]], factory,
                            card_selection_version=manifest.get("card_selection_version", 1)) if generated else tasks[row["task"]]
-        report.append(replay_row(task, row, directory, manifest.get("score_version", 1)))
+        replayed = replay_row(task, row, directory, manifest.get("score_version", 1))
+        report.append({**replayed, "replay_source_sha256": replay_source})
     return report
 
 

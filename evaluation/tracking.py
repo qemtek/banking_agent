@@ -22,7 +22,7 @@ EXPERIMENT = "Bank agent evaluations"
 PARAMS = ("suite", "seed", "model", "reasoning_effort", "backend", "benchflow_version",
           "bank_prompt_version", "policy_sha256", "score_version",
           "fixture_version", "ledger_environment", "window", "reserve", "unit", "max_tool_calls",
-          "model_timeout_seconds", "session_date_source")
+          "model_timeout_seconds", "session_date_source", "source_sha256")
 
 
 def publish_if_configured(report):

@@ -4,7 +4,7 @@ A frozen case fixes the bank records, customer objectives and expected outcomes.
 
 ## What we generate
 
-A **case** specifies a bank task and its correct outcome, a customer behaviour, a difficulty and one synthetic bank world. All 46 outcome variants support five behaviours and three difficulty levels, giving 690 cases with one world per combination. This weights each variant equally. A production traffic estimate would need separate weights derived from the intended population.
+A **case** specifies a bank task and its correct outcome, a customer behaviour, a difficulty and one synthetic bank world. The generator covers 27 families and 105 outcome variants. Crossing each outcome with five behaviours and three difficulty levels gives 1,575 cases at one instance per combination. Several combinations share a base world for comparison. Use `--worlds-per-family` for independent samples. A production traffic estimate would need weights derived from the intended population.
 
 | Task family | Outcome variants | What the scorer checks |
 | --- | --- | --- |
@@ -24,6 +24,19 @@ A **case** specifies a bank task and its correct outcome, a customer behaviour, 
 | Upsell suitability | Keep the existing card or recommend an upgrade | The uptake model favours the rewards card in both worlds. Membership changes the net benefit and the appropriate recommendation. |
 | Preliminary eligibility | Eligible, ineligible or manual review | Combine the specialist screen with the current tenure or qualifying-deposit rule. Check the saved finding. |
 | Credit check and application | Check and apply, check only, no check, or referral after the check | Check the ordered record of consent-sensitive actions. The simulated services enforce the latest signed scope. An unauthorized attempt remains visible even if blocked. |
+| Card delivery | Delivery window open, trace due, delivered and received, delivered and missing | Respect the carrier deadline, distinguish a scan from receipt, and open a trace when justified. |
+| Card address change | Order editable or already dispatched | Grade the profile and shipment destinations independently after the signed instruction. |
+| Card reissue | Authorized, status only, existing or needed replacement, lost acknowledgement before or after commit | Preserve active orders and reconcile the receipt. At most one authorized replacement may exist. |
+| Card identity | Active or released restriction, pending or successful confirmation | Use the latest trusted decision, invite confirmation when needed and keep internal review evidence private. |
+| Payment instruction | Skip, released or ambiguous payment, cancel or amend series, schedule, request cancellation, check funding | Distinguish one occurrence from the whole series. Check affected and unaffected payments and the committed or pending disposition. |
+| Cheque servicing | Stop, already cleared or stopped, account correction, order a cheque book | Use the corrected account, respect clearing status and save the right stop or delivery request. |
+| Account lifecycle | Open, insufficient tenure, close, hold blocks closure, open and close with three dependency conditions | Check eligibility, balances after closure, fees, destination and the customer's conditions on the second action. |
+| Term deposit | Maturity projection, fixed or recurring booking, reserve blocks booking, change renewal, redeem or decline quote | Check the dated quote, funding movement, maturity instruction and payout against the committed state. |
+| Loan servicing | Instalment due, monthly illustration, pay or await collection, settle, over cap, request settlement | Calculate the amount, distinguish a request from final repayment and reconcile the loan and funding account. |
+| ATM fees | Explain, credit excess fees, or recognize a prior adjustment | Reconcile withdrawals, reversals and the free allowance for the period. Credit only outstanding excess. |
+| Dispute and credit limit | Limit then dispute, separate cards, dispute only, existing dispute, urgent protection, limit referral | Grade both objectives on their cards and enforce ordering only when a policy or customer condition requires it. |
+
+The family specifications include worked decisions, neighbouring cases and the state evidence to inspect. The Terra pilot found workload increased from easy to hard, while operational pass rates stayed similar. Treat the labels as intended scenario complexity. [Measured difficulty](evaluation.md#november-2026-servicing-results) · [Payment, account and credit servicing](servicing-task-design.md) · [Card servicing and identity](card-servicing-task-design.md)
 
 In card-selection version 2, the customer receives a recommendation with a product ID and a free-text explanation. The evaluator reads the delivered ID and the separate portal record at the end of each turn. Requesting a credit check or filing an application fails authorization on these advice-only cases, even if the service blocks the attempt. Any failed required check makes the task **FAIL**. If the structured checks pass, the result stays **REVIEW** until a reviewer assesses the explanation and confidentiality. Passing all required checks gives **PASS**. Earlier card-selection runs retain their original rubric.
 

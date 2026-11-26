@@ -36,6 +36,14 @@ class Task:
     score: Callable[[Result, Sequence[dict]], Sequence[Check]]
     followups: Sequence[Turn] = ()
     render_reply: Optional[Callable[[Result, Sequence[dict]], Result]] = None
+    score_history: Optional[Callable[[Result, Sequence[Sequence[dict]]], Sequence[Check]]] = None
+
+    def score_turn(self, turn, result, events, history):
+        checks = list(turn.score(result, events))
+        if self.score_history:
+            history.append(events)
+            checks.extend(replace(c, source="history") for c in self.score_history(result, history))
+        return checks
 
 
 @dataclass(frozen=True)
@@ -76,6 +84,7 @@ def evaluate(task: Task, directory: Path, *, customer=None) -> Outcome:
     checks = []
     dialogue = []
     exchanges = []
+    history = []
 
     def outcome(error=""):
         overall, dimensions = scores(checks, error=bool(error))
@@ -138,7 +147,7 @@ def evaluate(task: Task, directory: Path, *, customer=None) -> Outcome:
                 snapshots.mkdir(exist_ok=True)
                 copy_database(fixture.state_database, snapshots / (result.run_id + ".sqlite"))
             state_checks = list(fixture.score_state(number)) if isinstance(fixture, Scenario) and fixture.score_state else []
-            judgments = [*turn.score(result, events), *(replace(c, source="state") for c in state_checks)]
+            judgments = [*task.score_turn(turn, result, events, history), *(replace(c, source="state") for c in state_checks)]
             if task.followups:
                 judgments = [replace(c, criterion=f"Turn {number} · {c.criterion}") for c in judgments]
             checks.extend(judgments)

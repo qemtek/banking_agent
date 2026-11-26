@@ -33,6 +33,10 @@ def load_arm(path):
     if len(versions) != 1:
         raise ValueError("Inconsistent report score versions")
     manifest["score_version"] = versions.pop()
+    replay_sources = {r.get("replay_source_sha256") for r in items}
+    if len(replay_sources) != 1:
+        raise ValueError("Inconsistent replay source across observations")
+    manifest["replay_source_sha256"] = replay_sources.pop()
     for row in items:
         key = (row["case_id"], row["repeat"])
         if key in rows or key[0] not in cases or key[1] < 1:
@@ -88,7 +92,8 @@ def compare(baseline, candidate, metric="task_pass", *, filters=None, review_sam
     if any(a[k] != b[k] for k in fixed) or left.keys() != right.keys():
         raise ValueError("Pairing requires identical cases, repeats, scorer, customer and model settings")
     for setting in ("backend", "sandbox_image", "env0_image", "benchflow_version",
-                    "max_tool_calls", "window", "reserve", "unit", "model_timeout_seconds", "session_date_source"):
+                    "max_tool_calls", "window", "reserve", "unit", "model_timeout_seconds", "session_date_source",
+                    "replay_source_sha256"):
         if a.get(setting) != b.get(setting):
             raise ValueError(f"Pairing requires matching {setting}")
     if Path(baseline).resolve() == Path(candidate).resolve() or a["arm"] == b["arm"]:
