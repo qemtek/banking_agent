@@ -26,6 +26,17 @@ class Scenario:
     reviewer: Optional[Callable[[int, Proposal], Optional[bool]]] = None
     record_exchange: Optional[Callable[[Any, str, Result], None]] = None
     state_database: Optional[Path] = None
+    score_state_for_request: Optional[Callable[[int, str], Sequence[Check]]] = None
+    score_state_for_reply: Optional[Callable[[int, str], Sequence[Check]]] = None
+
+    def check_state(self, number, message, reply=None):
+        if self.score_state_for_request:
+            checks = self.score_state_for_request(number, message)
+        else:
+            checks = self.score_state(number) if self.score_state else []
+        if self.score_state_for_reply and reply is not None:
+            return [*checks, *self.score_state_for_reply(number, reply)]
+        return checks
 
 
 @dataclass(frozen=True)
@@ -146,7 +157,7 @@ def evaluate(task: Task, directory: Path, *, customer=None) -> Outcome:
                 snapshots = directory / "snapshots"
                 snapshots.mkdir(exist_ok=True)
                 copy_database(fixture.state_database, snapshots / (result.run_id + ".sqlite"))
-            state_checks = list(fixture.score_state(number)) if isinstance(fixture, Scenario) and fixture.score_state else []
+            state_checks = fixture.check_state(number, message, result.reply) if isinstance(fixture, Scenario) else []
             judgments = [*task.score_turn(turn, result, events, history), *(replace(c, source="state") for c in state_checks)]
             if task.followups:
                 judgments = [replace(c, criterion=f"Turn {number} · {c.criterion}") for c in judgments]

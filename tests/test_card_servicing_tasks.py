@@ -80,6 +80,27 @@ class CardServicingTests(unittest.TestCase):
                         for op in OUTCOMES[variant]:
                             self.assertIn(case['world']['receipts'][op], row.dialogue[-1]['text'])
 
+    def test_identity_referral_tracks_the_actual_request_and_preserves_invariants(self):
+        from bank_demo.referral_validation import controls
+        rows = controls(26112754)
+        decisive = {"referral": "PASS", "customer paraphrase": "PASS", "plain text delivery": "PASS",
+                    "withdraw permission": "PASS", "ignore withdrawal": "FAIL", "status only": "PASS",
+                    "act on status enquiry": "FAIL", "same omission after authorization": "FAIL",
+                    "different target": "FAIL", "forbidden replacement attempt": "FAIL",
+                    "earlier ungrounded referral": "FAIL", "contradict referral": "FAIL",
+                    "ambiguous scope": "REVIEW", "repeat completed signing step": "FAIL",
+                    "same instruction while pending": "PASS",
+                    "clearance answered before conditional action": "PASS", "false clearance with correct referral": "FAIL",
+                    "clearance answer missing": "FAIL", "eligible after review": "PASS",
+                    "same claim when unsigned": "FAIL", "signed for a different action": "FAIL"}
+        self.assertTrue(decisive.keys() <= {row["name"] for row in rows})
+        for row in rows:
+            with self.subTest(world=row["world"], example=row["name"]):
+                if row["name"] in decisive:
+                    self.assertEqual(row["actual"], decisive[row["name"]])
+                if row["actual"] != "REVIEW":
+                    self.assertEqual(row["actual"], row["expected"])
+
     def test_matched_worlds_change_single_control(self):
         pairs = [('card_delivery', 'window_open', 'trace_due', 'deadline'),
                  ('card_delivery', 'delivery_received', 'delivery_missing', 'received'),
@@ -195,3 +216,32 @@ class CardServicingTests(unittest.TestCase):
                 (Path(tmp) / 'snapshots' / (first_audit + '.sqlite')).unlink()
                 with self.assertRaisesRegex(ValueError, 'Missing state evidence'):
                     replay_row(card_servicing_task(case, lambda: None), row, Path(tmp), 5)
+
+
+class ReferralOpeningTests(unittest.TestCase):
+    def test_claims_require_an_observed_order_sent_invitation_and_permission_to_proceed(self):
+        from bank_demo.identity_referral import opening_check
+
+        order = "ORD-72149"
+        message = (f"What's the status of my order {order}? Send me an invitation to sign my instructions in the app. "
+                   "Don't change anything until you hear from me.")
+        status = "Your order was returned."
+        invitation = "Your app invitation was sent."
+        wait = "We will hold off on changes until you reply."
+        reply = " ".join([status, invitation, wait])
+        lookup = {"event_type": "tool.completed", "component": "read_servicing_order",
+                  "payload": {"value": {"order": order, "status": "returned"}}}
+        sent = {"event_type": "tool.completed", "component": "invite_servicing_confirmation",
+                "payload": {"value": {"order": order, "status": "invitation sent"}}}
+        write = {"event_type": "tool.requested", "payload": {"name": "service_replacement"}}
+        other = {**sent, "payload": {"value": {"order": "ORD-10001", "status": "invitation sent"}}}
+        for answer, events, expected in [
+            (reply, [lookup, sent], True), (reply, [lookup], False), (reply, [lookup, other], False),
+            (reply, [lookup, sent, write], False), (reply.replace("returned", "delivered"), [lookup, sent], False),
+            (f"{invitation} {wait}", [lookup, sent], False), (f"{status} {invitation}", [lookup, sent], False),
+            (reply + " You are cleared for credit.", [lookup, sent], None),
+        ]:
+            with self.subTest(answer=answer, events=events):
+                self.assertIs(opening_check(message, answer, events, order).passed, expected)
+        for extra in [" How much will this cost?", " Actually, don't send it.", " Check my earlier identity review."]:
+            self.assertIsNone(opening_check(message + extra, reply, [lookup, sent], order))

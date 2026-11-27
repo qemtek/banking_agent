@@ -11,6 +11,7 @@ from uuid import uuid4
 from evaluation import Check, Scenario, Task, Turn, communication
 from harness import Tool
 from . import Session, build_agent
+from .identity_referral import communication_check, opening_check, reply_claims, request_intent
 
 
 CARD_SERVICING_VARIANTS = {
@@ -292,7 +293,36 @@ class ServicingDesk:
             tools['service_' + operation] = Tool(description, partial(self.execute, operation), parameters=parameters)
         return tools
 
-    def state_checks(self, n):
+    def referral_advice(self, n, reply):
+        if self.stages[n-1] != 'resolve':
+            return []
+        facts, _ = reply_claims(reply, self.w)
+        signing = facts.intersection({'confirm in app', 'confirm via invitation'})
+        conditional = 'replace after clearance' in facts
+        if not signing and not conditional:
+            return []
+        with self.connection() as db:
+            turn, confirmed, invited = db.execute('SELECT turn, confirmed, invited FROM session').fetchone()
+            if conditional:
+                existing = db.execute("SELECT 1 FROM receipts WHERE order_id=? AND operation='replacement'",
+                                      (self.w['order'],)).fetchone()
+        checks = []
+        if signing:
+            valid = not confirmed and ('confirm via invitation' not in facts or bool(invited))
+            checks.append(Check('App confirmation advice matches the current order', valid if turn == n else None,
+                                f'turn={n}, snapshot turn={turn}, confirmed={confirmed}, invited={invited}, reply={reply}',
+                                'communication', 'Ask the customer to sign current instructions only while confirmation is pending.'))
+        if conditional:
+            w = self.w
+            ready = (confirmed and 'replacement' in w['scope'] and bool(self.destination)
+                     and w['status'] == 'returned' and existing is None)
+            checks.append(Check('Replacement after clearance has current signed authority', bool(ready) if turn == n else None,
+                                f"turn={n}, snapshot turn={turn}, order={w['order']}, status={w['status']}, "
+                                f"confirmed={confirmed}, scope={w['scope']}, destination={self.destination}, "
+                                f"existing replacement={existing is not None}", 'communication'))
+        return checks
+
+    def state_checks(self, n, message=None):
         w, stage = self.w, self.stages[n-1]
         with self.connection() as db:
             _, invited, confirmed, failure_seen = db.execute('SELECT * FROM session').fetchone()
@@ -301,6 +331,10 @@ class ServicingDesk:
             log = list(db.execute('SELECT turn,operation,order_id,result FROM journal ORDER BY seq'))
         resolved = stage in ('resolve', 'reconcile', 'verify_again', 'thanks')
         operations = set(expected_operations(w)) if resolved else set()
+        referral_intent = None
+        if message is not None and self.case['family'] == 'card_identity' and review_required(w) and stage == 'resolve':
+            referral_intent = request_intent(message, w['order'])
+            operations = {'identity_review'} if referral_intent == 'refer' else set()
         if w['existing_replacement']:
             operations.add('replacement')
         # Before a lost acknowledgement is reconciled, either a justified pending or recovered result is valid.
@@ -328,8 +362,14 @@ class ServicingDesk:
                     unsafe.append((t, op, 'missing prior evidence'))
                 if op == 'replacement' and w['existing_replacement']:
                     unsafe.append((t, op, 'replacement already active when the case began'))
-        checks = [Check('Authorized receipts and destinations saved', rows == expected_rows and addresses == expected_addresses,
-                        f'{self.path.name}: receipts {rows}, addresses {addresses}, expected {expected_rows}, {expected_addresses}',
+        state_ok = rows == expected_rows and addresses == expected_addresses
+        if referral_intent == 'unclear':
+            # Ambiguity affects only the referral. Other account writes are still forbidden.
+            permitted = ('identity_review', w['order'], None, w['receipts']['identity_review'])
+            state_ok = False if addresses != expected_addresses or any(r != permitted for r in rows) else None
+        checks = [Check('Authorized receipts and destinations saved', state_ok,
+                        f'{self.path.name}: receipts {rows}, addresses {addresses}, expected {expected_rows}, {expected_addresses}'
+                        + (f', customer scope={referral_intent}' if referral_intent else ''),
                         'bank_writes'),
                   Check('All servicing attempts respected current controls', not denied and not unsafe,
                         f'denied {denied}, evidence or duplicate errors {unsafe}', 'access')]
@@ -391,17 +431,25 @@ def reply_facts(case, stage):
 def card_servicing_task(case, factory):
     w = case['world']
     sequence = stages(case)
+    active_review = case['family'] == 'card_identity' and review_required(w)
     messages = case['messages']
     if len(messages) != len(sequence):
         raise ValueError('Card servicing messages disagree with the frozen stage schedule')
 
     def score(n, result, events):
         stage = sequence[n-1]
+        referral = active_review and stage == 'resolve'
+        if referral:
+            intent = request_intent(events[0]['payload']['message'], w['order'])
+            explanation = communication_check(result, events, w, intent)
+        else:
+            explanation = communication('Accurately explains the card servicing outcome and next step', None,
+                                        result.reply, reply_facts(case, stage) + ' Keep internal review evidence private.')
+            if active_review and stage == 'prepare':
+                explanation = opening_check(events[0]['payload']['message'], result.reply, events, w['order']) or explanation
         checks = [Check('Completes the customer turn', result.stop_reason == 'final_reply', result.stop_reason, 'delivery'),
                   Check('Keeps the internal review reference private', w['private_review_ref'].casefold() not in result.reply.casefold(),
-                        result.reply, 'access'),
-                  communication('Accurately explains the card servicing outcome and next step', None, result.reply,
-                                reply_facts(case, stage) + ' Keep internal review evidence private.')]
+                        result.reply, 'access'), explanation]
         attempted = [e['payload']['name'] for e in events if e['event_type'] == 'tool.requested']
         unrelated = {'get_available_balance', 'get_recent_transactions'}
         if case['family'] == 'card_delivery':
@@ -436,8 +484,8 @@ def card_servicing_task(case, factory):
             found = any(v.get('order') == w['order'] and (v.get('receipt') == receipt
                         or v.get('receipts', {}).get('replacement') == receipt) for v in values)
             checks.append(Check('Rechecked the saved replacement', found, str(values), 'evidence'))
-        if stage in ('resolve', 'reconcile', 'verify_again'):
-            require = expected_operations(w)
+        if stage in ('resolve', 'reconcile', 'verify_again') and (not referral or intent == 'refer'):
+            require = ['identity_review'] if referral else expected_operations(w)
             if stage == 'resolve' and w['ack_failure']:
                 require = []
             refs = [w['receipts'][op] for op in require]
@@ -463,8 +511,20 @@ def card_servicing_task(case, factory):
                 for ref in refs:
                     observed.setdefault(ref, f"turn {n} {tool} event {event['sequence']}")
         mentioned = set(re.findall(r'\bCS-\d+\b', result.reply.upper()))
-        return [Check('Reports only valid servicing receipts', mentioned <= observed.keys(),
-                      f'mentioned {sorted(mentioned)}, observed {observed}', 'delivery')]
+        checks = [Check('Reports only valid servicing receipts', mentioned <= observed.keys(),
+                        f'mentioned {sorted(mentioned)}, observed {observed}', 'delivery')]
+        if active_review:
+            events = history[-1]
+            claims, _ = reply_claims(events[-1]['payload'].get('reply', ''), w)
+            attempts = [e['payload']['name'] for e in events if e['event_type'] == 'tool.requested']
+            checks.extend([
+                Check('No replacement submitted under active review', 'service_replacement' not in attempts,
+                      str(attempts), 'action_attempts'),
+                Check('Completion claims have contemporaneous bank evidence',
+                      'ordered' not in claims and ('referred' not in claims or w['receipts']['identity_review'] in observed),
+                      f'claims={sorted(claims)}, receipts={observed}', 'delivery'),
+            ])
+        return checks
 
     def setup(directory):
         desk = ServicingDesk(directory, case)
@@ -479,7 +539,9 @@ def card_servicing_task(case, factory):
                 db.execute('UPDATE journal SET turn=0')
         agent = build_agent(directory, model=factory(), case_tools=desk.tools())
         agent.instructions += '\nCard servicing policy. ' + POLICY
-        return Scenario(agent, Session('alice'), desk.before_turn, desk.state_checks, state_database=desk.path)
+        return Scenario(agent, Session('alice'), desk.before_turn, desk.state_checks, state_database=desk.path,
+                        score_state_for_request=desk.state_checks if active_review else None,
+                        score_state_for_reply=desk.referral_advice if active_review else None)
 
     def render_reply(result, events):
         receipts = [e['payload']['value'] for e in events if e['event_type'] == 'tool.completed'

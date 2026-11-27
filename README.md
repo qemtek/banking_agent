@@ -4,7 +4,7 @@ A Python learning project for building and evaluating a tool-using customer-serv
 
 The bank generates 118 development outcomes across 29 task families. Missing-card cases cover a first enquiry, a promised update and a declined purchase that leads the bank to an earlier misdelivery. Refund cases distinguish temporary bank relief from a merchant refund for the disputed purchase. The [source map](docs/guides/task-taxonomy.md#public-case-coverage) records the public cases behind the new work. [Missing-card development pilot](docs/guides/evaluation.md#missing-card-development-pilot)
 
-In a 330-world paired development pilot, the standard bank passed 291 cases operationally and the same bank with a task-completion skill passed 292. The evaluation guide reports results by family, estimated costs and sample sizes for a future comparison. [Pilot results](docs/guides/evaluation.md#november-2026-servicing-results)
+Terra medium passed 293 of 330 servicing cases operationally under the current grader. Five whole conversations passed, 39 had a known failure and 286 await a communication judgement. The baseline report covers all 29 families, measured costs, strengths and weaknesses, and the design for a paired model comparison. [Terra medium performance report](docs/terra-medium-report.md)
 
 The public baseline is tagged `mvp-eval-baseline-v1`. Later [release comparisons](docs/guides/evaluation.md#reproducing-the-release-comparisons) cover recovery after a card-order timeout and retention of decisive facts when a long dispute history is compacted.
 

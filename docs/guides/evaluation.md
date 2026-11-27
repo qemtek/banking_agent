@@ -20,7 +20,7 @@ For generated cases with a frozen service date, the bank and simulated customer 
 
 All generated bank families share a runaway limit of 128 tool calls per customer turn. A `call_limit` stop means the harness blocked a request. The turn audit records the configured ceiling and denied request. For scored conversations with complete audits, MLflow logs `bank_tool_requests`, `max_tool_requests_per_turn`, `tool_limit_stops` and `context_limit_stops`. The generated-run manifest also records the context budget and model timeout, and paired skill comparisons require matching limits. Terra allows ten minutes per model decision. The sandbox gives its host bridge another 40 seconds to return that decision and allows one hour for the whole trial.
 
-Scorer version 10 records operational and communication verdicts across every required turn. A known failure on either dimension fails the task. An outstanding judgement receives `REVIEW`. `ERROR` identifies an incomplete execution or a broken evaluation. Card servicing checks can trace a receipt to its first verified tool result on an earlier turn. An explicitly requested new order check still needs current evidence. A recorded review restriction authorizes the identity referral independently of the app signature required for replacement. For a dispute and limit change on separate cards, the charge itself establishes its card link. For a conditional closure prevented by failed eligibility, a notice on the retained account can report the blocked closure. Both checks use the state and evidence available at that turn.
+Scorer version 14 records operational and communication verdicts across every required turn. A known failure on either dimension fails the task. An outstanding judgement receives `REVIEW`. `ERROR` identifies an incomplete execution or a broken evaluation. Card servicing checks can trace a receipt to its first verified tool result on an earlier turn. An explicitly requested new order check still needs current evidence. A recorded review restriction authorizes the identity referral independently of the app signature required for replacement. For a dispute and limit change on separate cards, the charge itself establishes its card link. For a conditional closure prevented by failed eligibility, a notice on the retained account can report the blocked closure. Both checks use the state and evidence available at that turn.
 
 | Dimension | Evidence | Example |
 | --- | --- | --- |
@@ -51,13 +51,13 @@ Set `batch` to the directory containing your generated report. For a batch with 
 ```sh
 batch=audits/evaluations/YOUR_BATCH_ID
 python -m bank_demo.rescore "$batch"
-python -m evaluation.review export "$batch/rescore-v7.json" "$batch/reviewer-copy.json" --sample 12 --seed 412
+python -m evaluation.review export "$batch/rescore-v14.json" "$batch/reviewer-copy.json" --sample 12 --seed 412
 ```
 
 Each packet omits the arm, original verdict and matcher predictions. Fill in each criterion's `label` with `pass`, `fail` or `uncertain`. Leave unassessed criteria null. For an LLM customer, also mark `customer_fidelity` as `followed_brief`, `deviated` or `uncertain`. A deliberately misleading statement requested by the scenario follows the brief. An invented authorization that changes the task is a deviation. This annotation helps investigate attribution. A deviation alone does not establish that it caused the bank's error.
 
 ```sh
-python -m evaluation.review apply "$batch/rescore-v7.json" "$batch/reviewer-copy.json" \
+python -m evaluation.review apply "$batch/rescore-v14.json" "$batch/reviewer-copy.json" \
   --reviewer reviewer-a --output "$batch/reviewed-a.json"
 ```
 
@@ -124,6 +124,77 @@ To repeat the comparison locally, run the command below with the original develo
 python -m bank_demo.missing_card_wording \
   audits/evaluations/650b2483278f41b4aaf11b899d53fe66 \
   audits/experiments/missing-card-wording-repeat
+```
+
+### How often can we verify the customer received the correct replacement-card outcome?
+
+We replayed the saved Terra-medium development runs on 27 November 2026. “Received” means the bank delivered the outcome in the customer-visible conversation. The fixtures record order placement and messages. They cannot establish that a person read the message or physically received a card.
+
+| Saved sample | Verified correct | Verified incorrect | Unresolved |
+| --- | ---: | ---: | ---: |
+| 314 complete conversations | 31 (9.9%) | 13 (4.1%) | 270 (86.0%) |
+| 66 return turns from reused openings | 2 (3.0%) | 7 (10.6%) | 57 (86.4%) |
+
+The complete sample covers card reissue, identity review, missing-card first contacts and continuations, including cases where a trace, referral or wait was appropriate. Each executed arm and repeat counts once. The return sample contains wording experiments on shared openings. These counts describe the saved experiments and cannot estimate success on independent customers.
+
+The strongest directly observable result was **132 of 167 complete conversations (79.0%)** with a committed replacement. In those 132, the matching issuer receipt appeared in the public reply or attachment on a turn where the ledger and tool evidence supported it. Other statements in the same conversation can still be unresolved. In the frozen returns this narrower measure was 2/59.
+
+The replay checks each turn against its own SQLite state, validated audit, actual customer message and rendered public reply. A verified conversation requires every turn to pass. An established error on any turn makes it incorrect. All 13 incorrect conversations and seven incorrect returns had a required bank disposition missing from the ledger. For example, on “Ah, okay. What happens now?” the bank asked the customer to sign again. The app already held their signed instruction and the replacement had never been ordered.
+
+An investigation of the same 314 complete conversations traced the low coverage to the replacement-specific verifier. Replaying the ordinary version 10 task graders on the saved turn snapshots gave the following results.
+
+| What was assessed | Passed | Failed | Unresolved |
+| --- | ---: | ---: | ---: |
+| Expected bank writes at every turn | 299 | 15 | 0 |
+| All operational criteria, including mandatory evidence and access rules | 289 | 25 | 0 |
+| Whole conversation under the replacement-specific verifier | 31 | 13 | 270 |
+
+Of the 270 unresolved conversations, 268 passed every bank-write check. Two missed a required write in the frozen scenario. Reviewing the actual exchanges exposed different causes. On order `ORD-22050` the customer explicitly requested identity review. Terra asked for app confirmation and saved no referral, although policy allowed the referral immediately. On `ORD-76492` the scenario expected an order, while the simulated customer asked whether a replacement already existed after previously telling the bank to wait. The ledger establishes the discrepancy in both cases. The second exchange leaves attribution uncertain.
+
+The verifier compared the actual customer message with the scripted string. This was the first unresolved reason in 167 conversations, all with LLM customers. On `ORD-85326`, “If the bank requires identity review, arrange that review” became “If you require an identity review, please arrange it”. The bank saved the referral and delivered receipt `CS-47505`. The wording difference alone triggered review on that turn. Another 89 conversations first hit a branch with no success rule for a pending, prior or alternative disposition. Nine first hit unrecognized reply text and five first hit historical ambiguity about which public reference to give. All 57 unresolved frozen returns had that reference ambiguity. Every trial had readable replay evidence.
+
+In a diagnostic replay we bypassed only the script-equality gate, scoring the same messages and snapshots as though each customer had followed the intended request. Definitive verdicts rose from 44 to 51. Of the 263 still unresolved, 222 first hit the pending or alternative disposition branch. This diagnostic assumes customer fidelity and is unsuitable as a corrected score. The original reports also left a free-text communication criterion open in all 314 conversations. For automated comparisons, report bank state, required actions and customer-visible delivery separately. A claim about the whole conversation needs evidence for its remaining material statements. [Replacement verifier](../../bank_demo/replacement_outcomes.py) · [Scoring dimensions](../../evaluation/scoring.py)
+
+The verifier accepts equivalent completion wording and plain acknowledgements. It leaves unrecognized claims open even when the reply includes a genuine receipt. The local JSON records each turn and its reason. To reproduce the table from the original local archives, run:
+
+```sh
+python -m bank_demo.replacement_outcomes --output audits/replacement-outcomes.json
+```
+
+### Grading an identity-review referral
+
+Version 11 grades the decision turn of a `card_identity` case when the latest effective bank decision requires review. The same scorer runs during ordinary evaluation and snapshot replay. On a request to arrange review it expects exactly one referral for the target order, a grounded public referral receipt, and an explanation that replacement awaits the decision. A status enquiry requires a truthful status answer. A request to wait requires acknowledgement and no referral. An active restriction forbids a replacement attempt across the interaction, including one the tool rejects. A later referral cannot justify an earlier completion claim.
+
+The grader reads the actual customer turn and interprets the action, its object, conditions and withdrawals. For example, “send me the status of my identity review” authorizes a lookup, and “send this to the identity review team” authorizes a referral. A condition on replacing the card can coexist with an immediate referral request. Public communication uses the actual rendered receipt or grounded reply plus the surrounding claims. The card-specific language rules cover a bounded set of meanings. Unfamiliar requests, unsupported conditions and additional material claims can receive `REVIEW`. Unknown intent leaves independently provable violations in force.
+
+**Version 11 labelled development controls.** Six fresh generated worlds covered easy, medium and hard cases. Fixed customer and bank messages exercised the same tools, ledger, receipt renderer and scorer as a normal trial. Each control was also graded from saved snapshots and audit events. The final three worlds used additional wording pairs. Labels describe the expected outcome of each constructed interaction.
+
+| Authored outcome | Grader passed | Grader failed | Grader unresolved |
+| --- | ---: | ---: | ---: |
+| Correct | 48 | 0 | 9 |
+| Incorrect | 0 | 62 | 15 |
+| Insufficient evidence for a verdict | 0 | 0 | 15 |
+
+There were **zero false passes among 77 known incorrect controls and zero false failures among 57 known correct controls**. The grader abstained on 24 of those 134 known outcomes. Examples include an implicit request to send a file to the identity team and an unsupported promise of Monday delivery. The 149 controls reuse authored examples across worlds and include development examples used while writing the grader. They establish regression behavior and provide limited evidence of generalization.
+
+**Version 11 saved Terra-medium replay.** Both development arms contained the same eight eligible worlds. All 16 conversations had complete per-turn evidence. The operational criteria passed in 15 and failed in one. All 15 saved referrals had their receipt delivered. Eight referral decisions passed overall, one failed and seven remained unresolved. In the failed baseline run on order `ORD-22050`, the customer explicitly requested the referral and Terra asked for another app confirmation without filing it. Five unresolved replies included app instructions. One explained replacement after clearance in unassessed wording, and one customer combined a request for clarification with a conditional replacement instruction. Scoring *every* turn, including earlier status and general-policy answers, yielded four passes, one failure and eleven unresolved. The archived conversations have no independent semantic labels, so false-pass and false-failure counts apply to the labelled controls only.
+
+**Version 12 checks the app state when the bank replies.** In five of the seven unresolved decisions, the bank explicitly instructed the customer to complete the signed instructions in the app. In all five, the last authority lookup was on turn one while confirmation was pending. The decision-turn snapshots showed that the instructions had since been signed. All five now fail communication and retain their operational pass. Across the 16 decisions the revised counts are **8 pass, 6 fail and 2 unresolved**. Across whole conversations they are **4 pass, 6 fail and 6 unresolved**. The two open decisions concern the explanation of replacement after clearance and a compound customer question.
+
+Paired controls deliver the same instruction when signing is pending and when it is complete. Version 12 passes the former and fails the latter. A conditional reminder or a statement that the customer need not sign again does not trigger the stale-instruction failure. On 161 labelled controls there were zero false passes and zero false failures, with 30 abstentions on known outcomes and 15 intentionally indeterminate cases.
+
+**Version 13 grades conditional requests.** When a customer asks whether the card is cleared and requests replacement if so, the reply must answer the clearance question. While review is active, saying the customer is cleared fails even if the bank filed the right referral. A statement that the returned card can be replaced after clearance also requires current signed replacement authority, a confirmed destination and no existing replacement. A promise of automatic shipment remains a separate claim.
+
+Both previously open decisions passed. On `ORD-20538` the signed instructions authorized replacement at the confirmed destination once review cleared. On `ORD-55358` the bank answered that clearance was pending, filed the referral and gave its receipt. The 16 saved decisions now yield **10 passes, 6 failures and zero unresolved**. All six earlier failures retained their verdicts. Whole conversations yield six passes, six failures and four unresolved because of earlier turns.
+
+Across 194 labelled controls, the grader recorded zero false passes and zero false failures. It abstained on 33 known outcomes and all 15 deliberately indeterminate cases. Holding the reply constant and removing either the signature or replacement from the signed scope made the future-eligibility claim fail. Changing the clearance answer to “you're cleared” also failed with a correctly filed referral and valid receipt.
+
+**Version 14 covers the preparatory turn.** Four conversations on two orders had one outstanding judgement. The customer asked for the returned order’s status, an app invitation and a pause before any changes. The grader checks the observed order, successful invitation, attempted writes and customer-facing claims. Extra requests or unrecognised claims can still require review. All four passed. Across the two arms the whole-conversation counts are now 10 pass and 6 fail. The decision-turn results stayed the same. [Cross-family baseline report](../terra-medium-report.md)
+
+Reproduce the current results from local development archives with the command below. The JSON preserves the outcomes of individual controls and the evidence for each replayed decision. [Referral rubric](../../bank_demo/identity_referral.py) · [Control cases and replay](../../bank_demo/referral_validation.py)
+
+```sh
+python -m bank_demo.referral_validation --output audits/identity-review-grader-v14.json
 ```
 
 ### Which replacement reference should the customer receive?
@@ -230,7 +301,7 @@ Scorer v7 replays both arms from their original SQLite snapshots and ordered eve
 
 ### November 2026 servicing results
 
-All **330 independent worlds** received one attempt per arm. The standard bank passed **291/330** operationally and the same bank with the task-completion skill passed **292/330**. Twelve worlds improved, eleven regressed and all 660 attempts produced a score and complete token pricing. Estimated bank and customer usage was **$29.19**. These development observations support sample planning. They do not establish that the skill improves service.
+Under scorer v7, all **330 independent worlds** received one attempt per arm. The standard bank passed **291/330** operationally and the same bank with the task-completion skill passed **292/330**. Twelve worlds improved, eleven regressed and all 660 attempts produced a score and complete token pricing. Estimated bank and customer usage was **$29.19**. These development observations support sample planning. They do not establish that the skill improves service.
 
 Each arm saw 30 worlds per row. Wins and losses count changes from baseline to skill. The holdout is sized for one preselected family, a 10-point gain, 80% power and a two-sided 5% significance level. The budget interval is a 95% paired bootstrap interval for expected cost at the planned sample size and frozen token prices. Trials used Codex subscription access. Dollars are rate-card equivalents.
 

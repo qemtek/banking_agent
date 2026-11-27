@@ -35,6 +35,17 @@ def saved_source(check):
     return "turn"
 
 
+def read_saved_turn(path, conversation, number, *, renamed_opening=False):
+    with path.open() as stream:
+        first = json.loads(next(stream))
+        last = first
+        for line in stream:
+            last = json.loads(line)
+    run_id = first["run_id"] if renamed_opening else path.stem
+    result = Result(run_id, last["payload"]["reply"], last["payload"]["reason"])
+    return result, read_turn(path, result, conversation or first["payload"]["conversation_id"], number)
+
+
 def replay_row(task, row, directory, version):
     if row["status"] == "ERROR":
         return {**row, "dimensions": scores([], error=True)[1], "score_version": SCORE_VERSION}
@@ -55,11 +66,8 @@ def replay_row(task, row, directory, version):
         ledger_names = {m[0] for c in state if (m := re.match(r"ledger-[a-f0-9]+\.sqlite", c.evidence))}
         for n, (turn, audit) in enumerate(zip(turns, row["turn_audits"]), 1):
             path = trial / Path(audit).name
-            records = [json.loads(line) for line in path.read_text().splitlines()]
-            conversation = conversation or records[0]["payload"]["conversation_id"]
-            last = records[-1]["payload"]
-            result = Result(path.stem, last["reply"], last["reason"])
-            events = read_turn(path, result, conversation, n)
+            result, events = read_saved_turn(path, conversation, n)
+            conversation = events[0]["payload"]["conversation_id"]
             for index, event in enumerate(events):
                 if event["event_type"] == "approval.superseded":
                     events = events[:index]
@@ -80,7 +88,7 @@ def replay_row(task, row, directory, version):
                 if not snapshot.is_file():
                     raise ValueError(f"Missing state evidence for turn {n}")
                 copy_database(snapshot, database)
-                for c in fixture.score_state(n):
+                for c in fixture.check_state(n, events[0]["payload"]["message"], result.reply):
                     checks.append(replace(c, criterion=prefix + c.criterion, source="state",
                                           evidence=c.evidence.replace(database.name, next(iter(ledger_names), snapshot.name))))
                 origins.append(origin)
