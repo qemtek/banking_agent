@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
-SCORE_VERSION = 7
+SCORE_VERSION = 9
 
 
 @dataclass(frozen=True)

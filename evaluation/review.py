@@ -23,7 +23,7 @@ def review_items(report, rows):
         cases = {c["case_id"]: c for c in book["cases"]}
     items = {}
     for index, row in enumerate(rows):
-        if row.get("score_version", manifest.get("score_version")) not in (5, 6, SCORE_VERSION) or "dimensions" not in row:
+        if row.get("score_version", manifest.get("score_version")) not in (5, 6, 7, 8, SCORE_VERSION) or "dimensions" not in row:
             raise ValueError("Use a current scorecard or regrade the saved batch first")
         if row["status"] == "ERROR":
             continue

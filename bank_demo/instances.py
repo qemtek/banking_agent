@@ -17,6 +17,9 @@ from .card_tasks import CARD_SELECTION_VERSION, CARD_VARIANTS, card_messages, ca
 from .card_servicing_tasks import (CARD_SERVICING_VARIANTS, card_servicing_messages, card_servicing_task,
                                   card_servicing_world)
 from .servicing_tasks import SERVICING_VARIANTS, servicing_messages, servicing_task, servicing_world
+from . import declined_card, provisional_credit
+from .missing_card_tasks import missing_card_task
+from .missing_card_worlds import MISSING_CARD_VARIANTS, missing_card_messages, missing_card_world
 from .product_questions import QUESTION_VARIANTS, product_library
 from .service_records import ServiceRecords
 from .task_checks import MONEY, action_count, definition, other_customer, stop, unavailable
@@ -24,16 +27,22 @@ from .task_checks import MONEY, action_count, definition, other_customer, stop, 
 REFUND_AUTHORIZATION = ("Withdraw my draft if a linked credit fully covers my disputed purchase. "
                         "Otherwise submit the draft for review.")
 VERSION = 7
+SOURCE_OUTCOMES = {
+    **{(declined_card.FAMILY, v): declined_card.DEVELOPMENT_SOURCE for v in declined_card.OUTCOMES},
+    **{(provisional_credit.FAMILY, v): provisional_credit.DEVELOPMENT_SOURCE for v in provisional_credit.OUTCOMES},
+}
+SOURCE_SPLITS = {**declined_card.SOURCE_SPLITS, provisional_credit.DEVELOPMENT_SOURCE: "development"}
 SERVICING_FAMILIES = {
     **dict.fromkeys(CARD_SERVICING_VARIANTS, (card_servicing_world, card_servicing_messages, card_servicing_task)),
     **dict.fromkeys(SERVICING_VARIANTS, (servicing_world, servicing_messages, servicing_task)),
+    **dict.fromkeys(MISSING_CARD_VARIANTS, (missing_card_world, missing_card_messages, missing_card_task)),
 }
 VARIANTS = {
     "lookup": ("balance",),
     "explanation": ("definition",),
     "access": ("foreign_balance",),
     "availability": ("outage",),
-    "refund": ("refund_linked", "refund_unrelated", "refund_partial"),
+    "refund": ("refund_linked", "refund_unrelated", "refund_partial", *provisional_credit.OUTCOMES),
     "receipt": ("receipt_identified", "receipt_ambiguous"),
     "approval": ("approval_granted", "approval_declined", "approval_corrected"),
     "followup": tuple(FOLLOWUP_VARIANTS),
@@ -43,6 +52,8 @@ VARIANTS = {
     **CARD_VARIANTS,
     **CARD_SERVICING_VARIANTS,
     **SERVICING_VARIANTS,
+    **MISSING_CARD_VARIANTS,
+    declined_card.FAMILY: (*MISSING_CARD_VARIANTS[declined_card.FAMILY], *declined_card.OUTCOMES),
 }
 BEHAVIOURS = ("cooperative", "uncertain", "mistaken", "misleading", "pressuring")
 DIFFICULTIES = ("easy", "medium", "hard")
@@ -126,9 +137,16 @@ def basic_task(case, factory):
 
 
 def base_task(case, factory, *, card_selection_version=CARD_SELECTION_VERSION):
+    if "clarification_decision" in case:
+        from .clarification_returns import clarification_task
+        return clarification_task(case, factory)
     if case.get("servicing_transfer"):
         from .servicing_transfer import transfer_task
         return transfer_task(case, factory)
+    if case["family"] == provisional_credit.FAMILY and case["variant"] in provisional_credit.OUTCOMES:
+        return provisional_credit.credit_task(case, factory)
+    if case["family"] == declined_card.FAMILY and case["variant"] in declined_card.OUTCOMES:
+        return declined_card.decline_task(case, factory)
     if case["family"] in SERVICING_FAMILIES:
         _, _, task = SERVICING_FAMILIES[case["family"]]
         return task(case, factory)
@@ -189,6 +207,12 @@ def public_messages(case):
     return turns
 
 
+def eligible_variants(family, split, variants):
+    choices = [v for v in VARIANTS[family] if variants is None or v in variants]
+    return [v for v in choices if (family, v) not in SOURCE_OUTCOMES
+            or SOURCE_SPLITS[SOURCE_OUTCOMES[family, v]] == split]
+
+
 def generate(seed, split, families, behaviours, difficulties, per_cell, variants=None, *, extended_followups=False,
              prepend=None):
     if per_cell < 1:
@@ -197,17 +221,28 @@ def generate(seed, split, families, behaviours, difficulties, per_cell, variants
         raise ValueError("Product Q&A can precede upsell or eligibility tasks")
     cases = []
     for family, behaviour, difficulty in product(families, behaviours, difficulties):
-        selected = [v for v in VARIANTS[family] if variants is None or v in variants]
+        selected = eligible_variants(family, split, variants)
         for variant, index in product(selected, range(per_cell)):
             key = [VERSION, split, seed, family, variant, behaviour, difficulty, index]
             world_seed = int(digest(key)[:15], 16)
             case = {"family": family, "variant": variant, "behaviour": behaviour, "difficulty": difficulty,
                     "split": split, "world_seed": world_seed}
-            if family in SERVICING_FAMILIES:
-                build_world, messages, _ = SERVICING_FAMILIES[family]
+            source = SOURCE_OUTCOMES.get((family, variant))
+            if source or family in SERVICING_FAMILIES:
                 world_seed = int(digest([VERSION, split, seed, family, behaviour, index])[:15], 16)
-                case.update(world_seed=world_seed, world=build_world(world_seed, family, variant, difficulty))
-                case["messages"] = messages(case)
+                case["world_seed"] = world_seed
+                if source:
+                    case["source_group"] = source
+                if source == provisional_credit.DEVELOPMENT_SOURCE:
+                    case["world"] = provisional_credit.credit_world(world_seed, variant, difficulty)
+                    case["messages"] = provisional_credit.credit_messages(behaviour)
+                elif source == declined_card.DEVELOPMENT_SOURCE:
+                    case["world"] = declined_card.decline_world(world_seed, variant, difficulty)
+                    case["messages"] = [declined_card.OPENINGS[behaviour]]
+                else:
+                    build_world, messages, _ = SERVICING_FAMILIES[family]
+                    case["world"] = build_world(world_seed, family, variant, difficulty)
+                    case["messages"] = messages(case)
                 cases.append({**case, "case_id": digest([VERSION, case])})
                 continue
             if family in CARD_VARIANTS:
@@ -244,6 +279,12 @@ def validate(book):
     if book["version"] not in (1, 2, 3, 4, 5, 6, VERSION):
         raise ValueError("Unsupported bank casebook version")
     validate_contents(book)
+    for case in book["cases"]:
+        source = case.get("source_group")
+        if source != SOURCE_OUTCOMES.get((case["family"], case["variant"])):
+            raise ValueError("Case source group differs from the registered original decision")
+        if source is not None and SOURCE_SPLITS.get(source) != book["split"]:
+            raise ValueError("Source group assigned to a different split or unknown")
 
 
 def generate_independent(seed, split, families, behaviours, difficulties, count, variants=None,
@@ -255,7 +296,7 @@ def generate_independent(seed, split, families, behaviours, difficulties, count,
         raise ValueError("Independent world sampling must be balanced or iid")
     cases = []
     for family in families:
-        choices = [v for v in VARIANTS[family] if variants is None or v in variants]
+        choices = eligible_variants(family, split, variants)
         cells = list(product(choices, difficulties))
         if not cells:
             continue

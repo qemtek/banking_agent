@@ -54,7 +54,7 @@ class CasebookTests(unittest.TestCase):
             scenario = task.setup(self.directory)
             self.assertEqual(scenario.agent.max_calls, DEFAULT_MAX_TOOL_CALLS)
             self.assertEqual(len(case["messages"]), 1 + len(task.followups))
-            if case["family"] in CARD_VARIANTS or case["family"] in SERVICING_FAMILIES:
+            if case.get("source_group") or case["family"] in CARD_VARIANTS or case["family"] in SERVICING_FAMILIES:
                 self.assertTrue(scenario.state_database.is_file())
             else:
                 self.assertIsNotNone(scenario.reviewer)

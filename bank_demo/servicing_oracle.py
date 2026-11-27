@@ -32,6 +32,13 @@ def expected_service(case, turn, *, current_outcome=False):
     new = w["new_ref"]
     final = turn == 2 or not w["scope"] or current_outcome
     policy = w["policy"]
+    if turn == 2 and case.get("clarification_decision") in ("pending", "withdrawn"):
+        status = case["clarification_decision"]
+        return Expected(initial, [], status, r["amount"], evidence, f"The app decision is {status}. No change is authorised.")
+
+    if turn == 2 and "fee_enquiry" in case and policy["service_fee_pence"] > case["fee_cap_pence"]:
+        return Expected(initial, [], "over_cap", policy["service_fee_pence"], evidence,
+                        "The service fee exceeds the customer’s cap. Leave the instrument unchanged.")
 
     def commit(op, ref, **updates):
         ops.append([op, ref])
@@ -136,7 +143,14 @@ def expected_service(case, turn, *, current_outcome=False):
             else:
                 finding = "below_minimum"
     elif family == "loan_service":
-        if not scope:
+        if case["variant"] == "settlement_fee_estimate":
+            effective = max((d for d in w["policy_editions"] if d["effective_from"] <= w["as_of"]),
+                            key=lambda d: d["effective_from"])
+            waived = r["principal"] <= effective["terms"]["principal_ceiling_pence"]
+            amount = r["principal"] + r["accrued"] + (0 if waived else r["charge"])
+            finding = "estimate"
+            details = "The settlement charge is waived." if waived else "The full settlement charge applies."
+        elif not scope:
             illustration = case["variant"] == "monthly_illustration"
             finding = "illustrated" if illustration else "due"
             amount = monthly_payment(r["principal"], r["annual_bp"], r["months"]) if illustration else r["instalment"]

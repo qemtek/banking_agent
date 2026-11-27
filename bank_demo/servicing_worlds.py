@@ -15,7 +15,7 @@ SERVICING_VARIANTS = {
     "term_deposit": ("maturity_only", "book_fixed", "reserve_blocks_booking", "book_recurring",
                      "change_renewal", "close_deposit", "decline_exit_quote"),
     "loan_service": ("instalment_due", "monthly_illustration", "pay_instalment", "instalment_pending",
-                     "settle_loan", "settlement_over_cap", "request_settlement"),
+                     "settle_loan", "settlement_over_cap", "request_settlement", "settlement_fee_estimate"),
     "atm_fee": ("explain_fees", "credit_fees", "fees_already_corrected"),
     "dispute_credit_limit": ("limit_then_dispute", "independent_cards", "dispute_only",
                              "existing_dispute", "urgent_protection", "refer_limit"),
@@ -46,6 +46,7 @@ def servicing_world(seed, family, variant, difficulty):
         scope.append([op, key])
 
     flow = "single"
+    policy_editions = []
     followup = "I have confirmed in the app. Carry out only the changes I requested if the stated conditions are met."
     account = row("account", "Everyday", available=amount * 5, status="open", age_days=90, holds=0)
     other = row("account", "Household", available=amount * 3, status="open", age_days=29, holds=0)
@@ -185,7 +186,21 @@ def servicing_world(seed, family, variant, difficulty):
                           "pays accrued interest first. Settlement covers principal, accrued interest and charge. "
                           "The request-only channel accepts a ticket and keeps the loan open.")
         prompt = "How much is my next Home improvement loan instalment, and when is it due?"
-        if variant == "monthly_illustration":
+        if variant == "settlement_fee_estimate":
+            records[target]["charge"] = rng.randint(125, 2450)
+            ceilings = [principal, principal - rng.randint(1, 99)]
+            if (seed // 2) % 2:
+                ceilings.reverse()
+            switch = today + timedelta(days=seed % 2)
+            for start, ceiling in zip((today - timedelta(days=60), switch), ceilings):
+                policy_editions.append({"effective_from": str(start), "terms": {
+                    "rule": "Waive the settlement charge in full when outstanding principal is at or below the ceiling. "
+                            "Otherwise the full charge applies. Principal and accrued interest remain payable.",
+                    "principal_ceiling_pence": ceiling}})
+            rng.shuffle(policy_editions)
+            prompt = ("What would I pay to settle my Home improvement loan today, taking any fee relief "
+                      "into account? Please send me the estimate.")
+        elif variant == "monthly_illustration":
             prompt = f"Illustrate the monthly payment for £{gbp(principal)} over 12 months at my Home improvement loan rate."
         elif variant in ("pay_instalment", "instalment_pending"):
             prompt = "Pay my next Home improvement loan instalment now from Everyday unless collection is already pending."
@@ -276,7 +291,8 @@ def servicing_world(seed, family, variant, difficulty):
     records[private]["owner"] = "bob"
     entries = list(records.items())
     rng.shuffle(entries)
-    return {"as_of": str(today), "records": dict(entries), "subject": target, "primary": account, "other": other,
+    return {**({"policy_editions": policy_editions} if policy_editions else {}),
+            "as_of": str(today), "records": dict(entries), "subject": target, "primary": account, "other": other,
             "policy": policy, "prompt": prompt, "followup": followup, "scope": scope, "later": later,
             "flow": flow, "amount": amount, "edition": f"P-{next(ids)}", "difficulty": difficulty,
             "new_ref": f"NEW-{next(ids)}", "family": family}

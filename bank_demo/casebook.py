@@ -15,9 +15,11 @@ from evaluation.tracking import publish_if_configured
 from evaluation.usage import estimate_cost, price_card, usage_scorecard
 from .archive_case import freeze_handoff
 from . import BANK_PROMPT_VERSION, POLICY_SHA256
+from . import provisional_credit
 from .customer import ScenarioCustomer
 from .card_tasks import CARD_SELECTION_VERSION, CARD_VARIANTS
 from .servicing_worlds import SERVICING_VARIANTS
+from .missing_card_worlds import MISSING_CARD_VARIANTS
 from .followup_tasks import CORRECTIONS, FOLLOWUP_VARIANTS, OPENING_INSTRUCTION
 from .routing_tasks import FRAUD_REPORT, RECOGNISED_REPORT
 from .instances import (BEHAVIOURS, DIFFICULTIES, REFUND_AUTHORIZATION, SERVICING_FAMILIES, VARIANTS, digest, generate,
@@ -38,12 +40,19 @@ def actor(case, directory, factory=create_model):
               for m in case["messages"]]
     required = {}
     fixed = {}
+    persona = PERSONA[case["behaviour"]]
     if case["family"] in SERVICING_FAMILIES:
         for i in range(len(stages)):
             stages[i] += (" Preserve every identifier, amount, date and condition in this turn's objective. "
                           "Report only the app actions mentioned in this turn. Give consent only within the stated scope.")
     if case["family"] in SERVICING_VARIANTS and case["world"]["scope"]:
         # The app and the customer must deliver the same decision on the confirmation turn.
+        fixed.update(enumerate(case["messages"][1:], start=1))
+    if case["family"] in MISSING_CARD_VARIANTS:
+        stages[0] += (" Describe only the customer-facing situation in the objective. "
+                      "Leave the diagnosis, choice of bank procedure and actions to the adviser.")
+        if case["behaviour"] in ("mistaken", "misleading"):
+            persona = "Keep the customer's stated belief or claim exactly within the facts of this objective."
         fixed.update(enumerate(case["messages"][1:], start=1))
     if case["family"] in CARD_VARIANTS:
         for i in range(len(stages)):
@@ -60,6 +69,9 @@ def actor(case, directory, factory=create_model):
         fixed.update(dict(enumerate(case["messages"][1:], 1)))
     if case.get("conditional_withdrawal"):
         fixed = dict(enumerate(case["messages"]))
+    elif case["family"] == provisional_credit.FAMILY and case["variant"] in provisional_credit.OUTCOMES:
+        persona = "Use only the stated belief and facts in the customer objective."
+        fixed[1] = case["messages"][1]
     elif case["family"] == "refund":
         required[1] = REFUND_AUTHORIZATION
     if case["family"] == "followup":
@@ -73,8 +85,7 @@ def actor(case, directory, factory=create_model):
              "Only use facts in your objective or the public dialogue.")
     if today := service_date_instruction(case):
         brief += " " + today
-    return ScenarioCustomer(factory(), brief,
-                            PERSONA[case["behaviour"]], stages, directory / "customers", required, fixed)
+    return ScenarioCustomer(factory(), brief, persona, stages, directory / "customers", required, fixed)
 
 
 def write(path, data):
@@ -172,6 +183,10 @@ def run(book, args):
     manifest["max_tool_calls"] = DEFAULT_MAX_TOOL_CALLS
     if any(c["family"] in SERVICING_VARIANTS for c in book["cases"]):
         manifest["actor_version"] = 3
+    if any(c["family"] in MISSING_CARD_VARIANTS for c in book["cases"]):
+        manifest["actor_version"] = 4
+    if any(c["family"] == provisional_credit.FAMILY and c["variant"] in provisional_credit.OUTCOMES for c in book["cases"]):
+        manifest["actor_version"] = 5
     if any(service_date_instruction(c) for c in book["cases"]):
         manifest["session_date_source"] = "frozen_case"
     budget = getattr(model, "context_budget", None)

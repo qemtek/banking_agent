@@ -57,11 +57,15 @@ class HostDecision(CodexCLI):
 def worker():
     from .casebook import score_case
     inputs = json.loads((EXCHANGE / "case.json").read_text())
-    scored = score_case(directory=Path("/trial"), factory=HostDecision, **inputs)
+    if inputs.pop("frozen_card_return", False):
+        from .missing_card_wording import score_return
+        scored = score_return(inputs["case"], Path("/trial"), HostDecision)
+    else:
+        scored = score_case(directory=Path("/trial"), factory=HostDecision, **inputs)
     publish(EXCHANGE / "result.json", scored)
 
 
-async def execute(case, directory, customer_mode, instruction):
+async def execute(case, directory, customer_mode, instruction, *, frozen_card_return=False):
     from benchflow.environment import ManifestEnvironment, load_manifest
     from benchflow.sandbox.docker import DockerSandbox
     from benchflow.task.config import SandboxConfig
@@ -79,7 +83,7 @@ async def execute(case, directory, customer_mode, instruction):
                             task_env_config=SandboxConfig(docker_image=image, network_mode="no-network"))
     exchange = paths.agent_dir
     publish(exchange / "case.json", {"case": case, "customer_mode": customer_mode, "instruction": instruction,
-                                     "use_mailbox": mail is not None})
+                                     "use_mailbox": mail is not None, "frozen_card_return": frozen_card_return})
     model = create_model()
     try:
         await sandbox.start(force_build=False)

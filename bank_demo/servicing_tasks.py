@@ -143,6 +143,9 @@ class ServicingDesk:
     def policy(self, session):
         with self.db() as db:
             self.event(db, "policy")
+        if "policy_editions" in self.w:
+            return {"as_of": self.w["as_of"], "documents": self.w["policy_editions"],
+                    "selection": "Use the most recent edition effective on or before the service date."}
         policy = {k:v for k,v in self.w["policy"].items() if k not in ("settlement_cap", "minimum_payout", "requested_limit")}
         terms = [{"edition": self.w["edition"], "effective_from": self.w["as_of"], "terms": policy}]
         if self.case["difficulty"] == "hard":
@@ -163,6 +166,9 @@ class ServicingDesk:
             except ValueError as e:
                 return {"error": str(e)}
             self.event(db, "quote", reference, amount)
+            if self.case["variant"] == "settlement_fee_estimate":
+                return {"reference": reference, "as_of": self.w["as_of"], "pence": amount,
+                        "basis": "Gross early settlement before any policy-based fee relief."}
             return {"reference": reference, "as_of": self.w["as_of"], "pence": amount,
                     "basis": "maturity" if row["kind"] == "offer" else "early settlement"}
 
@@ -291,6 +297,12 @@ class ServicingDesk:
             actual = self.records(db)
             history = [(t,k,r,json.loads(v)) for t,k,r,v in db.execute("SELECT turn,kind,ref,value FROM events ORDER BY seq")]
         local = [event for event in history if event[0] == turn]
+        if turn == 2 and "clarification_decision" in self.case:
+            preview = {"reference": w["subject"], "finding": "estimate", "amount_pence": expected.amount}
+            boundary = next((i for i,(_,kind,_,v) in enumerate(local) if kind == "write" or
+                             (kind == "notice" and v != preview)), len(local))
+            # An accurate preview before the final action is allowed. A final outcome notice is still required.
+            local = [e for i,e in enumerate(local) if i >= boundary or e[1] != "notice"]
         writes = [[v["operation"],r] for _,k,r,v in history if k == "write"]
         notices = [v for _,k,_,v in local if k == "notice"]
         denied = [v for _,k,_,v in history if k == "denied"]
@@ -325,7 +337,7 @@ class ServicingDesk:
         required = expected.evidence
         if turn == 1 and early and any(n in early for n in notices):
             required = initial.evidence
-        evidence = required <= reads and "policy" in first_read_kinds
+        evidence = required <= reads and (w["flow"] == "clarify" or "policy" in first_read_kinds)
         if any(op == "open_savings" for op,_ in w["scope"]):
             subject = w["records"][w["subject"]]
             accounts = {ref:r for ref,r in w["records"].items() if r["kind"] == "account" and r["owner"]=="alice"}
@@ -342,15 +354,19 @@ class ServicingDesk:
             reported = [v for t,k,_,v in history if k=="breakdown" and t==1]
             breakdown_ok = bool(reported) and all(v==wanted for v in reported)
             evidence &= any(k == "atm_statement" and r == w["subject"] for _,k,r,_ in before)
-        need_quote = (w["records"][w["subject"]]["kind"] == "offer" or
+        fee_estimate = self.case["variant"] == "settlement_fee_estimate"
+        need_quote = (fee_estimate or w["records"][w["subject"]]["kind"] == "offer" or
                       bool({"redeem_deposit","settle_loan","request_settlement"} & {op for op,_ in w["scope"]}))
         if need_quote:
             # The saved quote must match the terms in force at the notice or mutation.
             latest = next((e[3] for e in reversed(available) if e[1] == "quote" and e[2] == w["subject"]),None)
-            evidence &= any(k == "quote" and r == w["subject"] for _,k,r,_ in before) and latest == expected.amount
+            quote_amount = finance_quote(w["records"][w["subject"]]) if fee_estimate else expected.amount
+            evidence &= any(k == "quote" and r == w["subject"] for _,k,r,_ in before) and latest == quote_amount
         if turn == 2 and w["later"]:
             evidence &= any(t == turn and k == "read" and r == w["subject"] for t,k,r,_ in available)
-        if w["flow"] == "clarify" and turn == 1:
+        # The fee-enquiry customer gives the account on return and requests verification
+        # before the change. Its opening general fee quote needs no instrument lookup.
+        if w["flow"] == "clarify" and turn == 1 and "fee_enquiry" not in self.case:
             evidence &= "directory" in first_read_kinds and bool(reads)
         mismatches = [r for r in sorted(actual.keys() | expected.rows.keys()) if actual.get(r) != expected.rows.get(r)]
         return [Check("Record ownership, balances, lifecycle and linked objects", not mismatches, str(mismatches), "bank_writes"),
@@ -359,6 +375,43 @@ class ServicingDesk:
                 Check("Read the applicable evidence and required current quote", bool(evidence), str(sorted(reads)), "evidence"),
                 Check("Delivered the correct scoped notice after any action", breakdown_ok and valid_notices and delivered_last,
                       f"permitted {permitted_notices}, delivered {notices}, previously delivered {already_delivered}", "outcome_delivery")]
+
+
+def clarification_policy_timing(case, result, history):
+    # Record facts can identify the customer’s item. A quote or an attempted change requires policy.
+    w = case["world"]
+    policy_seen = False
+    premature = []
+    for turn, events in enumerate(history, 1):
+        app = {}
+        for event in events:
+            data = event["payload"]
+            name = event["component"]
+            if event["event_type"] == "tool.completed":
+                value = data["value"]
+                if name == "read_servicing_policy" and value.get("documents"):
+                    policy_seen = True
+                elif name == "read_servicing_permissions":
+                    app = value.get("app_decision") or {}
+            if event["event_type"] != "tool.requested" or policy_seen or turn != len(history):
+                continue
+            name, args = data["name"], data["arguments"]
+            if name in COMMAND_HELP:
+                premature.append(name)
+            if name != "send_servicing_notice":
+                continue
+            if isinstance(args, dict):
+                if (args.get("reference") == "unresolved" and args.get("finding") == "clarify"
+                        and str(args.get("amount_pence")) == "0"):
+                    continue
+                if (args.get("finding") in ("pending", "withdrawn") and args.get("finding") == app.get("status")
+                        and args.get("reference") == app.get("reference") == w["subject"]
+                        and app.get("operation") == w["scope"][0][0]
+                        and str(args.get("amount_pence")) == str(app.get("amount_pence"))):
+                    continue
+            premature.append(str(args))
+    return [Check("Read effective policy before quoting terms or requesting a change", not premature,
+                  f"Premature requests: {premature}", "evidence")]
 
 
 def render_service_reply(result, events):
@@ -380,12 +433,12 @@ def render_service_reply(result, events):
     return replace(result, reply="\n".join([*parts, result.reply])) if parts else result
 
 
-def servicing_task(case, factory):
+def servicing_task(case, factory, *, desk_class=ServicingDesk):
     messages = case["messages"]
     w = case["world"]
 
     def setup(directory):
-        desk = ServicingDesk(directory, case)
+        desk = desk_class(directory, case)
         agent = build_agent(directory, model=factory(), case_tools=desk.tools())
         # These worlds model multiple accounts with their own balances and histories.
         for name in ("get_available_balance","get_recent_transactions"):
@@ -398,6 +451,8 @@ def servicing_task(case, factory):
                                "App confirmation takes effect on the customer's return and is available from read_servicing_permissions. "
                                "An empty list grants no write permission. Recheck changed records and respect actual signed scope. Use the available operation, then deliver its outcome. "
                                "Supply references from retrieved records. " + NOTICE_AMOUNTS[case["family"]])
+        if case["variant"] == "settlement_fee_estimate":
+            agent.instructions += " For a settlement estimate enquiry, send the net amount using the estimate finding."
         return Scenario(agent, Session("alice"), desk.advance, desk.state, state_database=desk.path)
 
     def score(n, result, events):
@@ -410,9 +465,14 @@ def servicing_task(case, factory):
                     explanation += f" The bank may instead report the established {initial.finding} finding now."
                 elif not w["later"]:
                     explanation += " An acknowledgement suffices if the correct result was already delivered."
+        if w["flow"] == "clarify":
+            explanation += (" An identification question may cite retrieved record facts. Any service terms or fee "
+                            "given in chat need evidence available before the reply. A matching app decision "
+                            "can support a report of what the app displayed.")
         return [Check("Completed the customer turn", result.stop_reason == "final_reply", result.stop_reason, "delivery"),
                 communication("Explains the actual outcome and conditions", None, result.reply,
                               explanation + " Address the customer's request and any blockers.")]
 
     return Task(case["variant"], messages[0], setup, partial(score,1),
-                tuple(Turn(m,partial(score,i)) for i,m in enumerate(messages[1:],2)), render_reply=render_service_reply)
+                tuple(Turn(m,partial(score,i)) for i,m in enumerate(messages[1:],2)), render_reply=render_service_reply,
+                score_history=partial(clarification_policy_timing, case) if w["flow"] == "clarify" else None)

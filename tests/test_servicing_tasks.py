@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from bank_demo import Session
+from bank_demo.loan_policy_pairs import generate as loan_policy_pairs
 from bank_demo.servicing_oracle import expected_service
 from bank_demo.servicing_tasks import ServicingDesk, servicing_messages, servicing_task
 from bank_demo.servicing_worlds import SERVICING_VARIANTS, servicing_world
@@ -35,7 +36,7 @@ def script(case):
             due = max(0,sum(r["network"]=="partner" for r in entries.values())-w["policy"]["free"])*w["policy"]["fee"]
             calls.append(ToolCall("send_atm_breakdown",{"account_reference":w["primary"],"charged_pence":str(fees),
                                   "due_pence":str(due),"withdrawal_references":",".join(entries)}))
-        if w["records"][w["subject"]]["kind"] == "offer" or any(
+        if case["variant"] == "settlement_fee_estimate" or w["records"][w["subject"]]["kind"] == "offer" or any(
             op in ("settle_loan","request_settlement","redeem_deposit") for op,_ in w["scope"]
         ):
             calls.append(ToolCall("get_servicing_quote",{"reference":w["subject"]}))
@@ -64,6 +65,25 @@ def run(case, calls):
 
 
 class ServicingTests(unittest.TestCase):
+    def test_future_tariff_changes_the_notice_but_not_the_source_quote(self):
+        twins = loan_policy_pairs(42, 1)["cases"]
+        left, right = twins
+        self.assertEqual(left["world"]["records"], right["world"]["records"])
+        self.assertEqual(left["messages"], right["messages"])
+        edits = [key for a,b in zip(left["world"]["policy_editions"], right["world"]["policy_editions"])
+                 for key in a if a[key] != b[key]]
+        self.assertEqual(edits, ["effective_from"])
+        for case, other in ((left, right), (right, left)):
+            correct = expected_service(case, 1).amount
+            incorrect = expected_service(other, 1).amount
+            self.assertNotEqual(correct, incorrect)
+            actions = script(case)
+            notice = next(i for i,a in enumerate(actions) if isinstance(a, ToolCall) and a.name == "send_servicing_notice")
+            actions[notice] = ToolCall("send_servicing_notice", {**actions[notice].arguments, "amount_pence": str(incorrect)})
+            result = run(case, actions)
+            self.assertTrue(all(c.passed for c in result.checks if c.category == "evidence"))
+            self.assertEqual([c.category for c in result.checks if c.passed is False], ["outcome_delivery"])
+
     def test_all_counterfactuals_and_levels(self):
         for family, variants in SERVICING_VARIANTS.items():
             for variant in variants:
