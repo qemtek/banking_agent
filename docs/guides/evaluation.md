@@ -20,7 +20,7 @@ For generated cases with a frozen service date, the bank and simulated customer 
 
 All generated bank families share a runaway limit of 128 tool calls per customer turn. A `call_limit` stop means the harness blocked a request. The turn audit records the configured ceiling and denied request. For scored conversations with complete audits, MLflow logs `bank_tool_requests`, `max_tool_requests_per_turn`, `tool_limit_stops` and `context_limit_stops`. The generated-run manifest also records the context budget and model timeout, and paired skill comparisons require matching limits. Terra allows ten minutes per model decision. The sandbox gives its host bridge another 40 seconds to return that decision and allows one hour for the whole trial.
 
-Scorer version 9 records operational and communication verdicts across every required turn. A known failure on either dimension fails the task. An outstanding judgement receives `REVIEW`. `ERROR` identifies an incomplete execution or a broken evaluation. Card servicing checks can trace a receipt to its first verified tool result on an earlier turn. An explicitly requested new order check still needs current evidence. A recorded review restriction authorizes the identity referral independently of the app signature required for replacement. For a dispute and limit change on separate cards, the charge itself establishes its card link. For a conditional closure prevented by failed eligibility, a notice on the retained account can report the blocked closure. Both checks use the state and evidence available at that turn.
+Scorer version 10 records operational and communication verdicts across every required turn. A known failure on either dimension fails the task. An outstanding judgement receives `REVIEW`. `ERROR` identifies an incomplete execution or a broken evaluation. Card servicing checks can trace a receipt to its first verified tool result on an earlier turn. An explicitly requested new order check still needs current evidence. A recorded review restriction authorizes the identity referral independently of the app signature required for replacement. For a dispute and limit change on separate cards, the charge itself establishes its card link. For a conditional closure prevented by failed eligibility, a notice on the retained account can report the blocked closure. Both checks use the state and evidence available at that turn.
 
 | Dimension | Evidence | Example |
 | --- | --- | --- |
@@ -405,3 +405,61 @@ Terra medium solved both sides of all three refund pairs on both attempts. Bank 
 ### Original 100-case development run
 
 Replaying the 100 existing development conversations produced 92 operational passes and eight failures. Twelve conversations failed a communication requirement at delivery. The other 88 await review of what was communicated. The 12 separately repeated conversations yielded 11 operational passes and one operational failure. These are measurements of the existing bank agent under the revised criteria.
+
+### Reproducing the release comparisons
+
+The public tag `mvp-eval-baseline-v1` identifies the bank and scorer before the recovery experiments. The following commands use the release evaluation code on main. They generate development-only casebooks. Each case runs in its own BenchFlow environment with a scripted customer and Terra medium. Local scorecards, snapshots, traces and credentials are excluded from Git.
+
+```sh
+python -m bank_demo.recovery_pilots timeout audits/release/timeout.json --seed 26112706 --bases 4
+python -m bank_demo.recovery_pilots verification audits/release/verification.json --seed 26112708 --bases 2
+python -m bank_demo.recovery_pilots compaction audits/release/disputes.json --seed 26112707 --bases 2
+python -c 'from bank_demo.recovery_pilots import TIMEOUT_INSTRUCTION; print(TIMEOUT_INSTRUCTION, end="")' > audits/release/timeout-policy.txt
+python -c 'from bank_demo.recovery_pilots import VERIFICATION_INSTRUCTION; print(VERIFICATION_INSTRUCTION, end="")' > audits/release/verification-policy.txt
+python -m bank_demo.casebook run audits/release/timeout.json --arm timeout-standard --workers 3
+python -m bank_demo.casebook run audits/release/timeout.json --arm timeout-lookup-first --workers 3 --instructions audits/release/timeout-policy.txt
+python -m bank_demo.casebook run audits/release/verification.json --arm verification-standard --workers 4
+python -m bank_demo.casebook run audits/release/verification.json --arm verification-lookup-first --workers 4 --instructions audits/release/verification-policy.txt
+python -m bank_demo.casebook run audits/release/disputes.json --arm dispute-wide --workers 3
+python -m bank_demo.casebook run-compaction audits/release/disputes.json --arm dispute-intermediate --workers 3 --input-bytes 14000
+python -m bank_demo.casebook run-compaction audits/release/disputes.json --arm dispute-compact --workers 3 --input-bytes 9500
+python -m bank_demo.recovery_report BASELINE_REPORT COMPARISON_REPORT
+```
+
+The comparison reads the ordered tool requests, delivered replies, immutable turn snapshots, audit timestamps and priced model usage. It reports individual financial outcomes even when the separate communication verdict is pending. A matched replay reproduces the inputs, environment and scoring. Live model outcomes can vary.
+
+#### Recovering a timed-out replacement
+
+The three historical failures were on the *return* turn. In all three, the original agent had already recovered the order and delivered the correct issuer receipt in the previous turn.
+
+| Case ID prefix | What had happened | What happened on return |
+| --- | --- | --- |
+| `0ac7d6707` | Commit succeeded before timeout. The bank read the order and delivered CS-47050. | The customer said they had the receipt. Terra said “You’re welcome!” The simulator had asked its customer to request another check. |
+| `8ab93f112` | Commit succeeded before timeout. The bank read the order and delivered CS-38463. | The customer explicitly asked whether it was the saved reference. Terra repeated it correctly without consulting the current order. |
+| `c02458a64` | Timeout occurred before commit. The bank found no replacement, retried once and delivered CS-39775. | The customer thanked the bank and repeated the reference. Terra acknowledged the thanks. |
+
+We froze the final simulated customer message when a scenario explicitly requires a return check. The new matched return cases start just after the prior contact received the same acknowledgement error. Each of four independent orders has a committed and an uncommitted sibling. Only the saved order distinguishes them. On both prompts Terra checked all 8/8 before retrying, retried only the four missing orders, left exactly one replacement at the authorized destination in every case and delivered all eight issuer receipts. The standard arm used 34 tool requests ($0.173 estimated) and the lookup-first arm 32 ($0.166). Both passed operationally in 8/8. V10 corrected a fixture rule that required rereading write authority even to report an existing order. The execution reports and their `rescore-v10.json` replays preserve that distinction.
+
+A second comparison used two fresh orders, both timeout outcomes and two different final customer messages. When explicitly asked to check again, both arms reread the order and returned the correct receipt in 4/4. When simply thanked, both avoided a further lookup in 4/4. There were no additional mutation attempts. Across the eight conversations, the current bank used 37 tool requests ($0.223 estimated), and the experimental recheck instruction used 34 ($0.213). The historical missed verification remains recorded. These development samples give no grounds to promote the prompt change.
+
+#### Preserving a large case history
+
+We froze two years of synthetic business-account correspondence with 29 completed exchanges and 1,611 posted statement entries per history. Two same-merchant, same-amount debits belonged to different invoices and disputes. An early signed instruction named the wrong invoice. A subsequent signed correction replaced it, a later merchant authorisation amounted to no posting, and a posted credit ultimately related to just one of the debits. The final customer request named none of the decisive references.
+
+Each of two independently seeded account histories had three endings: keep the draft despite its full refund, withdraw only after its own full refund, or keep it because the equal credit belongs to the other charge. Each ending ran live twice on Terra medium. Both arms had the adapter’s normal input allowance and the same bank tools, case state, system prompt and final customer question. We reopened the same frozen history in each arm. One received all exchanges. The other used the harness’s ordinary history summarizer before reopening, targeting at most 32 KiB of retained input. That target controls the size of the *result*, while the summarizer and bank both retain their normal dispatch allowance. The final turn has no tool for re-reading the discarded history. This directly measures retention in the handed-over context. Historical exchanges were generated from bank records; the summarization and resolution calls were live.
+
+| Six matched resolutions | Full history | Compacted history |
+| --- | ---: | ---: |
+| Provider-reported input tokens on the first decision, median | 118,367 | 16,389 |
+| Model-visible serialized input, median bytes | 326,923 | 19,204 |
+| Exact case, invoice, debit, linked credit or absence, credited pence, current signature and decision | 6/6 | 6/6 |
+| Correct final ledger, both drafts inspected | 6/6 | 6/6 |
+| Unauthorized withdrawal attempts | 0 | 0 |
+| Median elapsed time, including summarization and bank response | 17.4 s | 35.1 s |
+| Estimated cost, all bank and summary calls | $1.324 | $0.767 |
+
+All six summaries were actually used. In every compacted first request, the decisive case, invoice, debit and signature identifiers occurred in the summary and were absent from the retained raw suffix. The grader checked the structured resolution and SQLite state. In each arm the bank made both required withdrawals, kept the other four target drafts open, and preserved every non-target draft. The paired result was six ties. This is evidence for these specific facts and two synthetic account histories. It does not estimate the probability of losing information across the wider task catalogue.
+
+Generate and run from the project root with `python -m bank_demo.large_history audits/experiments/archive-retention-26112709 --seed 26112709 --bases 2 --workers 3`. Use a fresh output directory on a repeat. The manifest, paired scorecards, summary audits, bank requests and separate ledgers stay local. [Archive generator and grader](../../bank_demo/large_history.py)
+
+**Separate resource-pressure diagnostic.** An earlier comparison replayed six seven-turn disputes at the normal allowance and two deliberately reduced allowances. At normal settings all six completed, with 43 tool requests and $0.482 estimated cost. At 14,000 input bytes, four completed, with 70 archive-page reads and $0.898 estimated cost. At 9,500 bytes, one completed, with 122 archive-page reads and $1.063 estimated cost. All three configurations reached the expected final ledger in 6/6 with zero unauthorized attempts. Several customer turns still ended at the context limit. Median end-to-end conversation times were 116, 152 and 332 seconds respectively. These runs measure active-turn resource pressure and do not contribute to the large-history retention score or ordinary performance figures.

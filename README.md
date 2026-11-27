@@ -6,6 +6,8 @@ The bank generates 118 development outcomes across 29 task families. Missing-car
 
 In a 330-world paired development pilot, the standard bank passed 291 cases operationally and the same bank with a task-completion skill passed 292. The evaluation guide reports results by family, estimated costs and sample sizes for a future comparison. [Pilot results](docs/guides/evaluation.md#november-2026-servicing-results)
 
+The public baseline is tagged `mvp-eval-baseline-v1`. Later [release comparisons](docs/guides/evaluation.md#reproducing-the-release-comparisons) cover recovery after a card-order timeout and retention of decisive facts when a long dispute history is compacted.
+
 The [Terra weakness tracker](docs/guides/model-weaknesses.md) records recurring failures, examples from conversations and results of follow-up experiments.
 
 ## Run a conversation

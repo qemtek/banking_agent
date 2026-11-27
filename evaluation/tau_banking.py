@@ -5,7 +5,6 @@ import os
 import subprocess
 import sys
 import tarfile
-from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import monotonic
@@ -48,8 +47,6 @@ def run(output):
     from tau2.utils.llm_utils import to_litellm_messages
 
     client = CodexCLI()
-    # The external benchmark supplies its own policy, retrieval results and history.
-    client.context_budget = replace(client.context_budget, window=512 * 1024)
     pricing = {"model": client.model_id, "price_card": price_card()}
     config = TextRunConfig(domain="banking_knowledge", task_ids=TASKS, num_trials=2, seed=300,
                            llm_agent=client.model_id, llm_user=client.model_id,

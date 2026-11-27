@@ -19,7 +19,7 @@ The servicing development pilot ran Terra medium on 330 paired worlds. The stand
 
 In the earlier paired card-selection pilot, Terra passed 28/30 worlds operationally without the task-completion skill and 29/30 with it. One outcome improved, none regressed, and the two-sided paired p-value was 1.0. Nine of 100 turns used more than four tool requests. The busiest used six, well below the 128-call runaway limit. Estimated model cost was $2.09. The bank and customer subsequently received an explicit frozen service date, and the baseline passed both date-related failures in a separate check. Those two observations are outside the paired comparison. [Task-completion skill](../bank_demo/skills/task-completion/SKILL.md) · [Comparison method](guides/evaluation.md#comparing-systems)
 
-The released MVP baseline uses scorer v9. In the matched fee-capped comparison, the standard bank passed all 16 development cases operationally. Replacement recovery after timeouts and retention of early customer limits during compaction are the next development comparisons. [Clarification and fee results](guides/evaluation.md#when-clarification-needs-policy)
+The released MVP baseline uses scorer v9. In the matched fee-capped comparison, the standard bank passed all 16 development cases operationally. The [timeout comparisons](guides/evaluation.md#recovering-a-timed-out-replacement) and [large-history retention comparison](guides/evaluation.md#preserving-a-large-case-history) are complete. Both full and compacted histories produced six correct resolutions; ordinary evaluations inherit the adapter’s normal allowance. [Clarification and fee results](guides/evaluation.md#when-clarification-needs-policy)
 
 ## Benchmark expansion
 
@@ -83,6 +83,6 @@ Review the card pilot before choosing either candidate. If Terra struggles, iden
 
 1. Complete blind communication review before reporting overall task success.
 2. Choose a single family and skill for confirmation. Term deposits have the lowest projected cost at $10.41 for 111 pairs. Choose another family if its observed failures better match what the skill addresses. Check that the planning disagreement remains credible for any new candidate.
-3. Evaluate compaction on long conversations where an earlier decision or correction changes the final bank state. Compare correctness, policy compliance, cost and latency across context settings.
+3. Broader retention claims need independent histories and workflows beyond the two synthetic accounts in the completed large-history comparison.
 
 The demo uses synthetic services, host-authenticated sessions and a local audit store. Production deployment would also require retention and access controls, distributed checkpoint ownership and idempotent writes to external services.

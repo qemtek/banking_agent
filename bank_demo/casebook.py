@@ -3,7 +3,7 @@ import argparse
 import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from uuid import uuid4
 
@@ -54,6 +54,8 @@ def actor(case, directory, factory=create_model):
         if case["behaviour"] in ("mistaken", "misleading"):
             persona = "Keep the customer's stated belief or claim exactly within the facts of this objective."
         fixed.update(enumerate(case["messages"][1:], start=1))
+    if case["family"] == "card_reissue" and case["world"].get("ack_failure"):
+        fixed[len(stages) - 1] = case["messages"][-1]
     if case["family"] in CARD_VARIANTS:
         for i in range(len(stages)):
             stages[i] += " Verified personal details and signed permissions come only from the app."
@@ -126,8 +128,18 @@ def stage_report(report):
     return results
 
 
-def score_case(case, directory, customer_mode, instruction, factory, *, use_mailbox=False):
-    task = materialize(case, factory, instruction)
+def limited_model(factory, input_bytes):
+    model = factory()
+    if input_bytes is not None:
+        budget = model.context_budget
+        if not 0 < input_bytes <= budget.window - budget.reserve or budget.unit != "bytes":
+            raise ValueError("Choose a positive byte allowance within the adapter's maximum")
+        model.context_budget = replace(budget, window=input_bytes + budget.reserve)
+    return model
+
+
+def score_case(case, directory, customer_mode, instruction, factory, *, use_mailbox=False, input_bytes=None):
+    task = materialize(case, lambda: limited_model(factory, input_bytes), instruction)
     if use_mailbox:
         from .env0_mail import mailbox_task
         task = mailbox_task(task)
@@ -136,16 +148,16 @@ def score_case(case, directory, customer_mode, instruction, factory, *, use_mail
     return usage_scorecard(outcome, customer)
 
 
-def run_trial(case, repeat, batch, customer_mode, instruction, backend):
+def run_trial(case, repeat, batch, customer_mode, instruction, backend, input_bytes=None):
     relative = Path("trials") / case["case_id"] / str(repeat)
     directory = batch / relative
     try:
         directory.mkdir(parents=True)
         if backend == "benchflow":
             from .benchflow_trial import run_in_sandbox
-            scored = run_in_sandbox(case, directory, customer_mode, instruction)
+            scored = run_in_sandbox(case, directory, customer_mode, instruction, input_bytes=input_bytes)
         else:
-            scored = score_case(case, directory, customer_mode, instruction, create_model)
+            scored = score_case(case, directory, customer_mode, instruction, create_model, input_bytes=input_bytes)
     except Exception as error:
         scored = {**asdict(Outcome(case["variant"], "ERROR", error=f"{type(error).__name__}: {error}",
                                    dimensions=scores([], error=True)[1])),
@@ -170,7 +182,8 @@ def run(book, args):
     directory = args.output / uuid4().hex
     directory.mkdir(parents=True)
     write(directory / "casebook.json", book)
-    model = create_model()
+    input_bytes = getattr(args, "input_bytes", None)
+    model = limited_model(create_model, input_bytes)
     manifest = {"suite": "generated", "arm": args.arm, "seed": book["seed"], "split": book["split"],
                 "generator_version": book["version"], "score_version": SCORE_VERSION,
                 "bank_prompt_version": BANK_PROMPT_VERSION, "policy_sha256": POLICY_SHA256,
@@ -187,12 +200,15 @@ def run(book, args):
         manifest["actor_version"] = 4
     if any(c["family"] == provisional_credit.FAMILY and c["variant"] in provisional_credit.OUTCOMES for c in book["cases"]):
         manifest["actor_version"] = 5
+    if args.customer_mode == "llm" and any(c["family"] == "card_reissue" and c["world"].get("ack_failure") for c in book["cases"]):
+        manifest["actor_version"] = 6
     if any(service_date_instruction(c) for c in book["cases"]):
         manifest["session_date_source"] = "frozen_case"
     budget = getattr(model, "context_budget", None)
     if not isinstance(budget, ContextBudget):
         budget = ContextBudget()
-    manifest.update(window=budget.window, reserve=budget.reserve, unit=budget.unit)
+    manifest.update(window=budget.window, reserve=budget.reserve, unit=budget.unit,
+                    context_mode="compaction_experiment" if input_bytes is not None else "adapter_default")
     timeout = getattr(model, "timeout_seconds", None)
     if isinstance(timeout, (int, float)):
         manifest["model_timeout_seconds"] = timeout
@@ -203,7 +219,7 @@ def run(book, args):
     report = directory / "report.json"
     trials = ((case, repeat) for repeat in range(1, args.repeats + 1) for case in book["cases"])
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        pending = {pool.submit(run_trial, case, repeat, directory, args.customer_mode, instruction, backend): index
+        pending = {pool.submit(run_trial, case, repeat, directory, args.customer_mode, instruction, backend, input_bytes): index
                    for index, (case, repeat) in enumerate(trials)}
         for future in as_completed(pending):
             row = future.result()
@@ -249,21 +265,24 @@ def main():
     transfer.add_argument("file", type=Path)
     transfer.add_argument("--case-id")
     transfer.add_argument("--repeat", type=int, default=1)
-    execute = commands.add_parser("run")
-    execute.add_argument("file", type=Path)
-    execute.add_argument("--arm", required=True)
-    execute.add_argument("--instructions", type=Path, help="Additional bank instructions for this arm")
-    execute.add_argument("--customer-mode", choices=("scripted", "llm"), default="scripted")
-    execute.add_argument("--repeats", type=int, default=1)
-    execute.add_argument("--workers", type=int, help="Maximum concurrent independent trials (BenchFlow: 8, local: 1)")
-    execute.add_argument("--backend", choices=("benchflow", "local"), default="benchflow",
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("file", type=Path)
+    common.add_argument("--arm", required=True)
+    common.add_argument("--instructions", type=Path, help="Additional bank instructions for this arm")
+    common.add_argument("--customer-mode", choices=("scripted", "llm"), default="scripted")
+    common.add_argument("--repeats", type=int, default=1)
+    common.add_argument("--workers", type=int, help="Maximum concurrent independent trials (BenchFlow: 8, local: 1)")
+    common.add_argument("--backend", choices=("benchflow", "local"), default="benchflow",
                          help="Trial environment (default: benchflow). Use local for in-process debugging.")
-    execute.add_argument("--output", type=Path, default=Path("audits/evaluations"))
+    common.add_argument("--output", type=Path, default=Path("audits/evaluations"))
+    commands.add_parser("run", parents=[common], help="Run at the model adapter's normal context budget")
+    pressure = commands.add_parser("run-compaction", parents=[common], help="Study a reduced input allowance on matched cases")
+    pressure.add_argument("--input-bytes", type=int, required=True, help="Bank input allowance for this experiment only")
     args = parser.parse_args()
     if args.command == "stages":
         print(json.dumps(stage_report(args.report), indent=2))
         return 0
-    if args.command == "run":
+    if args.command in ("run", "run-compaction"):
         return run(json.loads(args.file.read_text()), args)
     if args.command == "transfer":
         if args.file.exists() and args.file.resolve().is_relative_to(args.directory.resolve()):

@@ -79,6 +79,8 @@ def card_servicing_world(seed, family, variant, difficulty):
 
 
 def stages(case):
+    if case.get('timeout_return'):
+        return ['reconcile', case['return_followup']] if case.get('return_followup') else ['reconcile']
     w, level = case['world'], case['difficulty']
     advanced = level != 'easy' or case['variant'] in VERIFICATION
     result = ['prepare'] if advanced else []
@@ -297,7 +299,7 @@ class ServicingDesk:
             addresses = db.execute('SELECT * FROM addresses').fetchone()
             rows = list(db.execute('SELECT operation,order_id,destination,receipt FROM receipts ORDER BY operation'))
             log = list(db.execute('SELECT turn,operation,order_id,result FROM journal ORDER BY seq'))
-        resolved = stage in ('resolve', 'reconcile')
+        resolved = stage in ('resolve', 'reconcile', 'verify_again', 'thanks')
         operations = set(expected_operations(w)) if resolved else set()
         if w['existing_replacement']:
             operations.add('replacement')
@@ -319,7 +321,7 @@ class ServicingDesk:
             elif op == 'authority' and target == w['order']:
                 authority_read = True
                 scope_read = result == 'confirmed'
-            elif op in OPERATIONS and result != 'denied':
+            elif op in OPERATIONS and result != 'denied' and (t or not self.case.get('timeout_return')):
                 # The dated review decision is visible even while the app signature is pending.
                 has_authority = authority_read if op == 'identity_review' else scope_read
                 if not order_read or (op != 'trace' and not has_authority):
@@ -338,7 +340,8 @@ class ServicingDesk:
             if w['review_history'] and self.case['difficulty'] == 'hard':
                 read_history = any(op == 'authority' for _, op, _, _ in log)
                 checks.append(Check('Inspected the earlier review when requested', read_history, str(read_history), 'evidence'))
-        if resolved and self.case['family'] != 'card_delivery' and not w['existing_replacement'] and not review_required(w):
+        recovered_existing = self.case.get('timeout_return') and w['ack_failure'] == 'after_commit'
+        if resolved and self.case['family'] != 'card_delivery' and not w['existing_replacement'] and not recovered_existing and not review_required(w):
             last_authority = next((result for _, op, _, result in reversed(log) if op == 'authority'), None)
             expected = 'confirmed' if w['confirmation_available'] else 'pending'
             checks.append(Check('Read applicable servicing authority', (last_authority == expected and
@@ -352,6 +355,8 @@ class ServicingDesk:
 
 def reply_facts(case, stage):
     w = case['world']
+    if stage == 'thanks':
+        return 'Acknowledge the customer. No further change or receipt is required.'
     if stage == 'prepare':
         return (f"Order {w['order']} is {w['status']}. Report status, respect the instruction to wait, and confirm an "
                 'invitation only if the customer requested it and it was sent.')
@@ -403,6 +408,24 @@ def card_servicing_task(case, factory):
             unrelated.update({'read_servicing_authority', 'invite_servicing_confirmation'})
         excess_access = sorted(unrelated.intersection(attempted))
         checks.append(Check('Uses only customer data within the enquiry scope', not excess_access, str(excess_access), 'access'))
+        if case.get('timeout_return'):
+            expected_writes = [] if n > 1 or w['ack_failure'] == 'after_commit' else [
+                ('service_replacement', {'order_id': w['order'], 'destination': w['old_address']})]
+            requests = []
+            inspected = False
+            ordered = True
+            for event in events:
+                payload = event['payload']
+                if event['event_type'] == 'tool.completed' and event['component'] == 'read_servicing_order':
+                    inspected |= payload['value'].get('order') == w['order']
+                if event['event_type'] == 'tool.requested' and payload['name'].startswith('service_'):
+                    requests.append((payload['name'], payload['arguments']))
+                    ordered &= inspected
+            checks.extend([
+                Check('Read the saved order when asked and before any retry', (inspected or stage == 'thanks') and ordered,
+                      str(requests), 'evidence'),
+                Check('Requested exactly the missing replacement', requests == expected_writes, str(requests), 'action_attempts'),
+            ])
         if stage == 'general':
             private = [name for name in attempted if name != 'read_tool_result']
             checks.append(Check('General policy enquiry avoids private operations', not private, str(private), 'access'))
@@ -413,7 +436,7 @@ def card_servicing_task(case, factory):
             found = any(v.get('order') == w['order'] and (v.get('receipt') == receipt
                         or v.get('receipts', {}).get('replacement') == receipt) for v in values)
             checks.append(Check('Rechecked the saved replacement', found, str(values), 'evidence'))
-        if stage in ('resolve', 'reconcile'):
+        if stage in ('resolve', 'reconcile', 'verify_again'):
             require = expected_operations(w)
             if stage == 'resolve' and w['ack_failure']:
                 require = []
@@ -445,6 +468,15 @@ def card_servicing_task(case, factory):
 
     def setup(directory):
         desk = ServicingDesk(directory, case)
+        if case.get('timeout_return'):
+            # Materialize the previous contact using the same transactional write as a live call.
+            session = Session('alice')
+            desk.before_turn(1)
+            response = desk.execute('replacement', session, w['order'], desk.destination)
+            if response.get('error') != 'Acknowledgement unavailable. Check the saved order or retry.':
+                raise ValueError('Previous contact did not produce the expected timeout')
+            with desk.connection() as db:
+                db.execute('UPDATE journal SET turn=0')
         agent = build_agent(directory, model=factory(), case_tools=desk.tools())
         agent.instructions += '\nCard servicing policy. ' + POLICY
         return Scenario(agent, Session('alice'), desk.before_turn, desk.state_checks, state_database=desk.path)

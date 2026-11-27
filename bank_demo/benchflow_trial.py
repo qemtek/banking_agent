@@ -65,7 +65,7 @@ def worker():
     publish(EXCHANGE / "result.json", scored)
 
 
-async def execute(case, directory, customer_mode, instruction, *, frozen_card_return=False):
+async def execute(case, directory, customer_mode, instruction, *, frozen_card_return=False, input_bytes=None):
     from benchflow.environment import ManifestEnvironment, load_manifest
     from benchflow.sandbox.docker import DockerSandbox
     from benchflow.task.config import SandboxConfig
@@ -83,7 +83,7 @@ async def execute(case, directory, customer_mode, instruction, *, frozen_card_re
                             task_env_config=SandboxConfig(docker_image=image, network_mode="no-network"))
     exchange = paths.agent_dir
     publish(exchange / "case.json", {"case": case, "customer_mode": customer_mode, "instruction": instruction,
-                                     "use_mailbox": mail is not None, "frozen_card_return": frozen_card_return})
+                                     "use_mailbox": mail is not None, "frozen_card_return": frozen_card_return, "input_bytes": input_bytes})
     model = create_model()
     try:
         await sandbox.start(force_build=False)
@@ -132,8 +132,8 @@ async def execute(case, directory, customer_mode, instruction, *, frozen_card_re
     return scored
 
 
-def run_in_sandbox(case, directory, customer_mode, instruction):
-    return asyncio.run(execute(case, directory, customer_mode, instruction))
+def run_in_sandbox(case, directory, customer_mode, instruction, *, input_bytes=None):
+    return asyncio.run(execute(case, directory, customer_mode, instruction, input_bytes=input_bytes))
 
 
 if __name__ == "__main__":

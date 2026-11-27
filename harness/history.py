@@ -23,7 +23,10 @@ class TurnHistory:
         self.summarize = summarize
         self.checkpoint = None
 
-    def compact(self, messages, tools, budget, limit, audit):
+    def compact(self, messages, tools, budget, limit, audit, *, target_size=None):
+        target = limit if target_size is None else target_size
+        if not 0 < target <= limit:
+            raise ValueError("Compaction target must fit the dispatch allowance")
         if self.summarize is None:
             return messages
         # Only replace contiguous completed turns following the last privileged instruction.
@@ -31,7 +34,7 @@ class TurnHistory:
         turns = [i for i in range(start, len(messages)) if messages[i]["role"] == "user"]
         if len(turns) < 2 or turns[0] != start:
             return messages
-        if budget._size(messages[:start] + messages[turns[-1]:], tools) >= limit:
+        if budget._size(messages[:start] + messages[turns[-1]:], tools) >= target:
             return messages
         end = start
         summary = []
@@ -41,7 +44,7 @@ class TurnHistory:
             if boundary in turns[1:] and digest(messages[start:boundary]) == source:
                 end, summary = boundary, [deepcopy(saved)]
         candidate = messages[:start] + summary + messages[end:]
-        while budget._size(candidate, tools) > limit:
+        while budget._size(candidate, tools) > target:
             chunk_end = end
             prompt = None
             boundaries = [point for point in turns[1:-1] if point > end] or [turns[-1]]
